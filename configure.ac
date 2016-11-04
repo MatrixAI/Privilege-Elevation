@@ -9,19 +9,15 @@ AC_CHECK_HEADER([ftw.h],    [], [AC_MSG_ERROR([<ftw.h> is required.])])
 
 AC_PROG_INSTALL
 
+dnl Substitute the PKEXEC_PATH
 AC_PATH_PROG([PKEXEC_PATH], [pkexec])
 if test -z "$PKEXEC_PATH"; then
     AC_MSG_ERROR([pkexec(1) is required.])
 fi
-AC_DEFINE_UNQUOTED([PKEXEC_PATH], ["$PKEXEC_PATH"])
 
-dnl Alright.. so, I can't seem to get pkglibexecdir inside AC_SUBST
-dnl Where is the variable...?
-dnl the bottom doesn't work atm...
+dnl Substitute the MECHANISM_NAME (which will be combined with `$(pkglibexecdir)` in the Makefile)
+AC_SUBST([MECHANISM_NAME], ["file-descriptor-mechanism"])
 
-dnl AC_SUBST([MECHANISM_PATH], ["$pkglibexecdir/file-descriptor-mechanism"])
-dnl AC_DEFINE([MECHANISM_PATH], ["$(pkglibexecdir)/file-descriptor-mechanism"])
-
-AC_CONFIG_FILES([Makefile src/Makefile policy/Makefile policy/ai.matrix.pkexec.file-descriptor-example.policy])
+AC_CONFIG_FILES([Makefile src/Makefile policy/Makefile])
 
 AC_OUTPUT

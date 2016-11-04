@@ -1,4 +1,5 @@
 dist_pkgdata_DATA = ai.matrix.pkexec.file-descriptor-example.policy
 
-# if autoconf is what injects the file, then automake is the one to eventually put this in polkit-1
-# but how to do that?
+# todo:
+# perform substitution on the policy file with MECHANISM_PATH => $(mechanism_path)
+# install the policy file under pkgdata but with an extra polkit-1 directory
