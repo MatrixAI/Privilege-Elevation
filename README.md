@@ -230,4 +230,32 @@ Or `autoreconf` is enough.
 
 ```
 autoreconf --force --install --verbose
+./configure
+# try this
+make
+make install
+# or this
+make distcheck
+make dist
+```
+
+Need to do this on a Linux computer.
+
+On the maintainer:
+
+```
+autoreconf --force --install --verbose 
+./configure
+make distcheck
+make dist
+```
+
+On the end user:
+
+```
+tax xvfz ./package.tar.gz
+cd package
+./configure
+make
+make install
 ```

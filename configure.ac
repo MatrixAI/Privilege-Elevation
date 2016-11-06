@@ -1,5 +1,5 @@
 AC_INIT(file-descriptor-example, 0.0.1)
-AC_CONFIG_SRCDIR(src/file-descriptor-client.c)
+AC_CONFIG_SRCDIR(src/client.c)
 AM_INIT_AUTOMAKE([foreign])
 
 AC_PROG_CC
@@ -16,7 +16,7 @@ if test -z "$PKEXEC_PATH"; then
 fi
 
 dnl Substitute the MECHANISM_NAME (which will be combined with `$(pkglibexecdir)` in the Makefile)
-AC_SUBST([MECHANISM_NAME], ["file-descriptor-mechanism"])
+AC_SUBST([MECHANISM_NAME], ["mechanism"])
 
 AC_CONFIG_FILES([Makefile src/Makefile policy/Makefile])
 
