@@ -1,6 +1,6 @@
-# acquire PKEXEC_PATH and MECHANISM_NAME from configure
-# export them to the sub-Makefiles in SUBDIRs
 export pkexec_path = @PKEXEC_PATH@
-export mechanism_path = $(pkglibexecdir)/@MECHANISM_NAME@
+export mechanisms_path = $(pkglibexecdir)
+
+EXTRA_DIST = default.nix
 
 SUBDIRS = src policy

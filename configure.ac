@@ -1,4 +1,4 @@
-AC_INIT(file-descriptor-example, 0.0.1)
+AC_INIT(privilege-elevation, 0.0.1)
 AC_CONFIG_SRCDIR(src/client.c)
 AM_INIT_AUTOMAKE([foreign])
 
@@ -14,9 +14,6 @@ AC_PATH_PROG([PKEXEC_PATH], [pkexec])
 if test -z "$PKEXEC_PATH"; then
     AC_MSG_ERROR([pkexec(1) is required.])
 fi
-
-dnl Substitute the MECHANISM_NAME (which will be combined with `$(pkglibexecdir)` in the Makefile)
-AC_SUBST([MECHANISM_NAME], ["mechanism"])
 
 AC_CONFIG_FILES([Makefile src/Makefile policy/Makefile])
 
