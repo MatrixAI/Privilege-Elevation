@@ -11,6 +11,7 @@
 #include <sys/socket.h> // PF_UNIX, SOCK_STREAM, socklen_t, struct ucred, socket(), bind(), listen(), accept(), getsockopt
 #include <sys/un.h>     // UNIX_PATH_MAX, struct sockaddr_un
 #include <sys/types.h>  // pid_t
+#include "argparse.h"
 
 #define XSTR(s) STR(s)
 #define STR(s) #s

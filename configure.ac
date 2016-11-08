@@ -1,5 +1,5 @@
 AC_INIT(privilege-elevation, 0.0.1)
-AC_CONFIG_SRCDIR(src/client.c)
+AC_CONFIG_SRCDIR(src/privilege-elevation.c)
 AM_INIT_AUTOMAKE([foreign])
 
 AC_PROG_CC
@@ -15,6 +15,6 @@ if test -z "$PKEXEC_PATH"; then
     AC_MSG_ERROR([pkexec(1) is required.])
 fi
 
-AC_CONFIG_FILES([Makefile src/Makefile policy/Makefile])
+AC_CONFIG_FILES([Makefile src/Makefile policy/Makefile argparse/GNUMakefile])
 
 AC_OUTPUT

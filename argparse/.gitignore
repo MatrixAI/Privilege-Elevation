@@ -3,3 +3,4 @@ test_argparse
 *.[ao]
 *.dylib
 *.so
+GNUMakefile

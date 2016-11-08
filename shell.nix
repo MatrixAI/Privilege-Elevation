@@ -9,6 +9,13 @@
 # wait... shouldn't it be like a propagatedBuildInputs
 # I don't really understand how multiple sources work with regards to $out.. etc
 # and how that become part of the buildInputs!?
+# we can use this function to take another nix expression that defines
+# the building of argparse
+# and then have it available in the current environment
+# but that's only if we care about the other package being a separate package
+# preferably we just define it here
+# but what if we could just bring in default.nix defining the current package?
+# https://ocharles.org.uk/blog/posts/2014-02-04-how-i-develop-with-nixos.html
 { pkgs ? import <nixpkgs> {} }:
 
     # imports pkgs into current namespace

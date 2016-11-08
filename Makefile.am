@@ -1,6 +1,6 @@
 export pkexec_path = @PKEXEC_PATH@
 export mechanisms_path = $(pkglibexecdir)
 
-EXTRA_DIST = default.nix
+EXTRA_DIST = $(srcdir)/default.nix
 
-SUBDIRS = src policy
+SUBDIRS = src policy argparse

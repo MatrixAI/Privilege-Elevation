@@ -298,3 +298,28 @@ For option B, you can statically link or dynamically link to the second package,
 Also read this: https://news.ycombinator.com/item?id=10658412
 
 Nix is really the solution, but really we need get Nix working on cygwin! Well the shell.nix should be quite useful in this regard for development, and an easy way to specify external sources aswell. But then it makes it difficult to develop on anything that is not Nix based. Then again, this particular library requires Nix anyway!
+
+Using option B, you should use pkg-config to find the libraries that you need, specifically the linking flags. Read this: http://david.rothlis.net/large-gnu-make/
+
+For option A, you will hit up the problem of autotools subpackages, it's not easy to integrate non-autotooled subpackages in an autotooled package.
+
+* https://www.gnu.org/software/automake/manual/html_node/Subpackages.html (for autotools subpackages)
+* https://www.gnu.org/software/automake/manual/html_node/Third_002dParty-Makefiles.html#Third_002dParty-Makefiles (for non-autotools third party pacakges)
+
+Isn't there an easy way to do this instead of wrapping their makefiles, can't I just directly build them and bypass their infrastructure?
+
+This is the best resource: https://autotools.io/index.html
+
+---
+
+Using git submodules and:
+
+https://www.gnu.org/software/automake/manual/html_node/Third_002dParty-Makefiles.html#Third_002dParty-Makefiles
+
+and also non-recursive make?
+
+Actually since the subpackage is not an automake package we have to instead use git subtree, since we are going to have to change the repo itself, and add in a `GNUmakefile.in`, that basically wraps the original `Makefile`.
+
+```
+git subtree add --prefix argparse https://github.com/cofyc/argparse.git master --squash
+```
