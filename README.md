@@ -323,3 +323,19 @@ Actually since the subpackage is not an automake package we have to instead use 
 ```
 git subtree add --prefix argparse https://github.com/cofyc/argparse.git master --squash
 ```
+
+---
+
+# lib_LIBRARIES would install into libdir
+# pkglib_LIBRARIES would install in libdir/package-name
+# noinst_LIBRARIES won't be installed
+# static libraries use LIBADD for extra libraries not LDADD
+# while executables uses LDADD for extra libraries and LDFLAGS for -l libraries
+
+
+---
+
+#noinst_LIBRARIES = libargparse.a
+#libargparse_a_SOURCES = argparse/argparse.c
+#libargparse_a_CFLAGS = -fPIC
+#libargparse_a_LIBADD = -lm
