@@ -50,6 +50,11 @@ int main(int argc, char * * argv) {
 
     atexit(cleanup_and_exit);
 
+    // USE ARGPARSE, make sure to make a copy of argv since it changes it
+    // and acquire the parameters necessary to choose which action to take
+    // like opening a serial port
+    // or something else...
+
     const char socket_name[] = "socket.sock";
 
     const char * temporary_folder = getenv("TMPDIR");

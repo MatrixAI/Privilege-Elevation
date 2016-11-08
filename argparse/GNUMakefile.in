@@ -52,11 +52,11 @@ installcheck: ;
 
 mostlyclean: clean
 
-distclean: clean
-	rm -f GNUMakefile
+distclean: clean 
+	-rm -f GNUMakefile
 
-maintainer-clean: clean
-	rm -f GNUMakefile
+maintainer-clean: clean 
+	-rm -f GNUMakefile
 
 dvi: ;
 
