@@ -1,5 +1,5 @@
 #include <stdlib.h>     // EXIT_FAILURE, exit(), mkdtemp(), getenv(), atexit()
-#include <stdio.h>      // snprintf(), remove()
+#include <stdio.h>      // printf(), snprintf(), remove()
 #include <stddef.h>     // NULL
 #include <stdbool.h>    // bool, true, false
 #include <string.h>     // size_t, strcmp(), strcpy()
@@ -7,7 +7,7 @@
 #include <errno.h>      // perror()
 #include <ftw.h>        // nftw()
 #include <libgen.h>     // basename()
-#include <assert.h>     // assert() 
+#include <assert.h>     // assert()
 #include <sys/socket.h> // PF_UNIX, SOCK_STREAM, socklen_t, struct ucred, socket(), bind(), listen(), accept(), getsockopt
 #include <sys/un.h>     // UNIX_PATH_MAX, struct sockaddr_un
 #include <sys/types.h>  // pid_t
@@ -19,6 +19,8 @@
 #if !defined(PKEXEC_PATH) || !defined(MECHANISMS_PATH)
     #error "PKEXEC_PATH and MECHANISMS_PATH must be defined."
 #endif
+
+
 
 static char unix_sock_dir[UNIX_PATH_MAX] = {0};
 
@@ -39,16 +41,42 @@ int ntfw_callback(const char * path, const struct stat * sb, int type_flag, stru
 void cleanup_and_exit() {
 
     if (unix_sock_dir && *unix_sock_dir) {
-        
+
         ntfw(unix_sock_dir, ntfw_callback, 64, FTW_DEPTH | FTW_PHYS);
 
     }
 
 }
 
+// serial port parameters
+static const char * const usage[] = {
+    "privilege-elevation [options] [[--] args]",
+    "privilege-elevation [options]",
+    NULL,
+};
+
 int main(int argc, char * * argv) {
 
     atexit(cleanup_and_exit);
+
+    // make a copy of argv for purposes of parsing
+    // argv is an array of pointers pointing to string arrays
+    char * * argv_ = malloc(sizeof (char *) * argc)
+    memcpy(argv_, argv, sizeof(char *) * argc)
+
+    const char * serial_port = NULL;
+
+    struct argparse_option options[] {
+        OPT_HELP(),
+        OPT_GROUP("Basic options"),
+        OPT_STRING("s", "serial-port", &serial_port, "serial port to open"),
+        OPT_END()
+    };
+
+    // err.. how do you actually open a serial port in C?
+
+
+
 
     // USE ARGPARSE, make sure to make a copy of argv since it changes it
     // and acquire the parameters necessary to choose which action to take
@@ -64,10 +92,10 @@ int main(int argc, char * * argv) {
 
     char template[UNIX_PATH_MAX - sizeof(socket_name) + 1]; // +1 for \0 byte
     if (snprintf(
-            template, 
-            sizeof(template), 
-            "%s/%s", 
-            temporary_folder, 
+            template,
+            sizeof(template),
+            "%s/%s",
+            temporary_folder,
             "polkit_demo.XXXXXX"
         ) >= sizeof(template)
     ) {
@@ -114,7 +142,7 @@ int main(int argc, char * * argv) {
 
         perror("fork()");
         exit(EXIT_FAILURE);
-    
+
     } else if (mechanism_pid == 0) {
 
         // cannot pass a literal into basename because it mutates it

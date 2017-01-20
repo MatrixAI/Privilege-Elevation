@@ -1,3 +1,33 @@
+Privilege-Elevation
+===================
+
+Development:
+
+Run `./bootstrap`.
+
+Executing privilege-elevation should demonstrate the opening of a serial port.
+So you pass a serial port in. Upon attempting to execute it, it is going to run
+pkexec of open-serial-device.c. This will cause a pkexec prompt to showup and
+follow the polkit policy that has been installed. Upon succeeding authorisation,
+the command is then to pass a file descriptor over a UNIX socket back to the
+original program, which is privilege-elevation.c.
+
+This is different from normal polkit programs who have a long running daemon.
+As that would mean the daemon is the one that is already authorised with superuser
+privileges, and a client program attempts a task by asking the daemon. The daemon
+uses polkit to check whether the client is allowed, and if allowed performs the task.
+
+We don't have a daemon here, so we rely on pkexec to launch an authorised by superuser
+program and use the same functionality to trigger a privilege elevation request.
+
+
+
+
+
+---
+
+NIXOS/NIX
+
 Remember everything is built inside the `/tmp/...` directory which is notated as "$out". The make file should itself understand to put thigns there into "$out". But where is "$out"? It's not the `/tmp/...` path right, it must be the nix store path!
 
 Another option is:
@@ -64,7 +94,7 @@ This is what needs to built in "$out".
 
 Now I need to know how the crap the paths are being redefined for libexec.
 
-Turns out that this is done with autoconf. Here is an example: 
+Turns out that this is done with autoconf. Here is an example:
 
 https://www.gnu.org/software/gnats/doc/gnats-4.1.999/html_node/exec_002dprefix.html
 
@@ -96,13 +126,17 @@ out is for any files that were not captured in bin/dev/doc.
 I think:
 
 bin -> executables, libexecs, shared objects necessary for execution
-dev -> shared objects necessary for further development or binding and headers for inclusion 
+dev -> shared objects necessary for further development or binding and headers for inclusion
 doc -> manual, html manual.. etc
 out -> everything else
 
 These include C(++) headers, pkg-config, cmake and aclocal files.
 
 There's a few others: https://github.com/NixOS/nixpkgs/blob/master/doc/multiple-output.xml
+
+---
+
+AUTOCONF
 
 https://github.com/edrosten/autoconf_tutorial
 
@@ -114,7 +148,7 @@ So this is how its done, I just read the NetworkManager source file, and there's
 
 The `*.am` are automake files. So they generate makefile.in, which then does other things.
 
-Ok we just have read more of automake and how it uses the macros. Because specifically we would need to apply the libexec path to both the policy file itself, and the source file (on the path to fork and exeec), prior to building.
+Ok we just have read more of automake and how it uses the macros. Because specifically we would need to apply the libexec path to both the policy file itself, and the source file (on the path to fork and exec), prior to building.
 
 ---
 
@@ -229,7 +263,7 @@ Need to do this on a Linux computer.
 On the maintainer:
 
 ```
-autoreconf --force --install --verbose 
+autoreconf --force --install --verbose
 ./configure
 make distcheck
 make dist
@@ -291,7 +325,7 @@ You can:
 A. Just bring it into your own source code tree, and distribute as a single common source code tree with both your application and the third party library. This can be done with git subtrees or git submodules or just plain copy and paste.
 B. Try to package the third party library as a separate distributable code, target specific distros, like Nixpkgs, debian or rpm, and write both the package manager DSL for the third party library and your code, and submit, and hope they work. So now you have 2 packages instead of 1, and now you're also maintaining the package manager DSL for both packages. Not a bad idea, if the library itself will be seen as useful for the distro community. In the case of Nixos, it's pretty inclusive.
 
-For option A, you will have to statically link into the library or just compile into a single object. Static linking is only necessary if you don't have access to the source code (but you do have access to the headers!). 
+For option A, you will have to statically link into the library or just compile into a single object. Static linking is only necessary if you don't have access to the source code (but you do have access to the headers!).
 
 For option B, you can statically link or dynamically link to the second package, and this is slightly more scalable, as future projects may also rely on this library, and from there on, you don't need it as part of your distributable source code, but simply part of any package derivation DSL. In the case of nixpkgs, this is just a simple parameter specification of the library package as part of `nixpkgs.pkgs`. For other distros, you may need to look pkg-config and how to set that up.
 
@@ -339,3 +373,10 @@ git subtree add --prefix argparse https://github.com/cofyc/argparse.git master -
 #libargparse_a_SOURCES = argparse/argparse.c
 #libargparse_a_CFLAGS = -fPIC
 #libargparse_a_LIBADD = -lm
+
+---
+
+fcntl -> File control
+pcntl -> Process control
+
+https://github.com/cofyc/argparse

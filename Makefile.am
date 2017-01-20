@@ -4,12 +4,14 @@ polkitactiondir = $(datadir)/polkit-1/actions
 
 AM_CFLAGS = -Wall
 
-bin_PROGRAMS = privilege-elevation
+bin_PROGRAMS = privilege-elevation test
+
 privilege_elevation_SOURCES = src/privilege-elevation.c
 privilege_elevation_CFLAGS = -Iargparse -DPKEXEC_PATH=\"$(pkexec_path)\" -DMECHANISMS_PATH=\"$(mechanisms_path)\"
 privilege_elevation_LDADD = argparse/libargparse.a
 
 pkglibexec_PROGRAMS = open-serial-device
+
 open_serial_device_SOURCES = src/open-serial-device.c
 open_serial_device_CFLAGS = -Iargparse
 open_serial_device_LDADD = argparse/libargparse.a
@@ -22,10 +24,10 @@ install-data-hook:
 argparse/libargparse.a: Makefile
 	cd argparse && $(MAKE) $(AM_MAKEFLAGS) all
 
-check-local: 
+check-local:
 	cd argparse && $(MAKE) $(AM_MAKEFLAGS) test
 
-clean-local: 
+clean-local:
 	cd argparse && $(MAKE) $(AM_MAKEFLAGS) clean && rm -f *.so
 
 EXTRA_DIST = README.md default.nix shell.nix argparse

@@ -6,7 +6,7 @@
     <vendor>MatrixAI</vendor>
     <vendor_url>https://matrix.ai</vendor_url>
     <action id="ai.matrix.pkexec.privilege-elevation.open-serial-device">
-        <message>Authentication is required to to open serial device for Privilege Elevation Program. (user=$(user), program=$(program), command_line=$(command_line))</message>
+        <message>Authentication is required to open serial device for Privilege Elevation Program. (user=$(user), program=$(program), command_line=$(command_line))</message>
         <defaults>
             <allow_any>no</allow_any>
             <allow_inactive>no</allow_inactive>
