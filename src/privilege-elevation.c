@@ -132,6 +132,13 @@ int main(int argc, char * * argv) {
         exit(EX_OSERR);
     }
 
+    // set the listening socket to non-blocking
+    // because: http://stackoverflow.com/a/3444832/582917
+    if (fcntl(unix_sock_fd, F_SETFL, (fcntl(unix_sock_fd, F_GETFL, 0) | O_NONBLOCK)) == -1) {
+        perror("fcntl()");
+        exit(EX_OSERR);
+    }
+
     // bind the socket to the socket address
     if (bind(unix_sock_fd, (struct sockaddr *) &unix_sock_addr, sizeof(unix_sock_addr)) != 0) {
         perror("bind()");
@@ -228,8 +235,11 @@ int main(int argc, char * * argv) {
     // it shouldn't take long to open a serial port!
 
     // this is to set the socket that accepts
-    fcntl(unix_sock_fd, F_SETFL, (fcntl(unix_sock_fd, F_GETFL, 0) | O_NONBLOCK));
 
+    // the best solution appears to be pselect
+    // it appears to be an alternative to the self-pipe trick
+    // however pselect is not as portable as the self-pipe trick
+    // this article explains the main problem: https://lwn.net/Articles/176911/
 
     // mechanism's unix socket address
     struct sockaddr_un unix_peer_addr = {0};
@@ -243,6 +253,7 @@ int main(int argc, char * * argv) {
 
     // I DON'T like the above solution...
     // An alternative is: http://stackoverflow.com/a/29245438/582917
+    // another alternative is to use pselect: http://stackoverflow.com/a/29245576/582917
     // Basically we need a SIGCHLD signal handler
     // The signal handler should write to another pipe
     // Then a select can select on both this pipe and the unix domain socket file descriptor
