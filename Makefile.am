@@ -1,13 +1,14 @@
 pkexec_path = @PKEXEC_PATH@
 mechanisms_path = $(pkglibexecdir)
+mechanism_path = $(mechanisms_path)/open-serial-device
 polkitactiondir = $(datadir)/polkit-1/actions
 
 AM_CFLAGS = -Wall
 
-bin_PROGRAMS = privilege-elevation test
+bin_PROGRAMS = privilege-elevation
 
 privilege_elevation_SOURCES = src/privilege-elevation.c
-privilege_elevation_CFLAGS = -Iargparse -DPKEXEC_PATH=\"$(pkexec_path)\" -DMECHANISMS_PATH=\"$(mechanisms_path)\"
+privilege_elevation_CFLAGS = -Iargparse -DPKEXEC_PATH=\"$(pkexec_path)\" -DMECHANISM_PATH=\"$(mechanism_path)\"
 privilege_elevation_LDADD = argparse/libargparse.a
 
 pkglibexec_PROGRAMS = open-serial-device
@@ -19,7 +20,7 @@ open_serial_device_LDADD = argparse/libargparse.a
 dist_polkitaction_DATA = policy/ai.matrix.pkexec.privilege-elevation.policy
 
 install-data-hook:
-	sed --in-place --expression='s/MECHANISMS_PATH/$(mechanisms_path)/g' $(DESTDIR)$(datadir)/polkit-1/actions/ai.matrix.pkexec.privilege-elevation.policy
+	sed --in-place --expression='s/MECHANISM_PATH/$(subst /,\/,$(mechanism_path))/g' $(DESTDIR)$(datadir)/polkit-1/actions/ai.matrix.pkexec.privilege-elevation.policy
 
 argparse/libargparse.a: Makefile
 	cd argparse && $(MAKE) $(AM_MAKEFLAGS) all
