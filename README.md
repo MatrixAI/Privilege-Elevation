@@ -20,9 +20,111 @@ uses polkit to check whether the client is allowed, and if allowed performs the 
 We don't have a daemon here, so we rely on pkexec to launch an authorised by superuser
 program and use the same functionality to trigger a privilege elevation request.
 
+https://lwn.net/Articles/176911/
+https://jineshkj.wordpress.com/2008/02/02/why-pselect/
+https://linux.die.net/man/2/pselect
+http://pubs.opengroup.org/onlinepubs/009695399/functions/accept.html
+https://linux.die.net/man/2/waitpid
+https://cr.yp.to/docs/selfpipe.html
 
+```
+int send_fd(int socket, int fd_to_send)
+{
+ struct msghdr socket_message;
+ struct iovec io_vector[1];
+ struct cmsghdr *control_message = NULL;
+ char message_buffer[1];
+ /* storage space needed for an ancillary element with a paylod of length
+    is CMSG_SPACE(sizeof(length)) */
+ char ancillary_element_buffer[CMSG_SPACE(sizeof(int))];
+ int available_ancillary_element_buffer_space;
 
+ /* at least one vector of one byte must be sent */
+ message_buffer[0] = 'F';
+ io_vector[0].iov_base = message_buffer;
+ io_vector[0].iov_len = 1;
 
+ /* initialize socket message */
+ memset(&socket_message, 0, sizeof(struct msghdr));
+ socket_message.msg_iov = io_vector;
+ socket_message.msg_iovlen = 1;
+
+ /* provide space for the ancillary data */
+ available_ancillary_element_buffer_space = CMSG_SPACE(sizeof(int));
+ memset(ancillary_element_buffer, 0, available_ancillary_element_buffer_space);
+ socket_message.msg_control = ancillary_element_buffer;
+ socket_message.msg_controllen = available_ancillary_element_buffer_space;
+
+ /* initialize a single ancillary data element for fd passing */
+ control_message = CMSG_FIRSTHDR(&socket_message);
+ control_message->cmsg_level = SOL_SOCKET;
+ control_message->cmsg_type = SCM_RIGHTS;
+ control_message->cmsg_len = CMSG_LEN(sizeof(int));
+ *((int *) CMSG_DATA(control_message)) = fd_to_send;
+
+ return sendmsg(socket, &socket_message, 0);
+}
+
+int recv_fd(int socket)
+{
+ int sent_fd, available_ancillary_element_buffer_space;
+ struct msghdr socket_message;
+ struct iovec io_vector[1];
+ struct cmsghdr *control_message = NULL;
+ char message_buffer[1];
+ char ancillary_element_buffer[CMSG_SPACE(sizeof(int))];
+
+ /* start clean */
+ memset(&socket_message, 0, sizeof(struct msghdr));
+ memset(ancillary_element_buffer, 0, CMSG_SPACE(sizeof(int)));
+
+ /* setup a place to fill in message contents */
+ io_vector[0].iov_base = message_buffer;
+ io_vector[0].iov_len = 1;
+ socket_message.msg_iov = io_vector;
+ socket_message.msg_iovlen = 1;
+
+ /* provide space for the ancillary data */
+ socket_message.msg_control = ancillary_element_buffer;
+ socket_message.msg_controllen = CMSG_SPACE(sizeof(int));
+
+ if(recvmsg(socket, &socket_message, MSG_CMSG_CLOEXEC) < 0)
+  return -1;
+
+ if(message_buffer[0] != 'F')
+ {
+  /* this did not originate from the above function */
+  return -1;
+ }
+
+ if((socket_message.msg_flags & MSG_CTRUNC) == MSG_CTRUNC)
+ {
+  /* we did not provide enough space for the ancillary element array */
+  return -1;
+ }
+
+ /* iterate ancillary elements */
+  for(control_message = CMSG_FIRSTHDR(&socket_message);
+      control_message != NULL;
+      control_message = CMSG_NXTHDR(&socket_message, control_message))
+ {
+  if( (control_message->cmsg_level == SOL_SOCKET) &&
+      (control_message->cmsg_type == SCM_RIGHTS) )
+  {
+   sent_fd = *((int *) CMSG_DATA(control_message));
+   return sent_fd;
+  }
+ }
+
+ return -1;
+}
+```
+
+> File descriptors can be sent from one process to another by two means. One way is by inheritance, the other is by passing through a unix domain socket. There are three reasons I know of why one might do this. The first is that on platforms that don't have a credentials passing mechanism but do have a file descriptor passing mechanism, an authentication scheme based on file system privilege demonstration could be used instead. The second is if one process has file system privileges that the other does not. The third is scenarios where a server will hand a connection's file descriptor to another already started helper process of some kind. Again this area is different from OS to OS. On Linux this is done with a socket feature known as ancillary data.
+
+> It works by one side sending some data to the other (at least 1 byte) with attached ancillary data. Normally this facility is used for odd features of various underlying network protocols, such as TCP/IP's out of band data. This is accomplished with the lower level socket function sendmsg() that accepts both arrays of IO vectors and control data message objects as members of its struct msghdr parameter. Ancillary, also known as control, data in sockets takes the form of a struct cmsghdr. The members of this structure can mean different things based on what type of socket it is used with. Making it even more squirrelly is that most of these structures need to be modified with macros. Here are two example functions based on the ones available in Warren Gay's book mention at the end of this article. A socket's peer that read data sent to it by send_fd() without using recv_fd() would just get a single capital F.
+
+* http://stackoverflow.com/questions/6947413/how-to-open-read-and-write-from-serial-port-in-c
 
 ---
 
@@ -281,13 +383,7 @@ make install
 
 ---
 
-Need to use this:
-
-https://github.com/cofyc/argparse
-
-How?
-
----
+Embedded static dependency: https://github.com/cofyc/argparse
 
 Can't the default.nix not only be the package derivation, but also be used to setup the minimal nix-shell environment to imperatively compile the package and anything else. We still have to use `stdenv.mkDerivation`, but instead of just `buildInputs`, there's going to be `propagatedBuildInputs`. Is this harmful in general? Or can I just add it in? Maybe.. we should have different `default.nix`, perhaps a `shell.nix` instead doing the propagatedBuildInputs.
 
@@ -360,12 +456,15 @@ git subtree add --prefix argparse https://github.com/cofyc/argparse.git master -
 
 ---
 
-# lib_LIBRARIES would install into libdir
-# pkglib_LIBRARIES would install in libdir/package-name
-# noinst_LIBRARIES won't be installed
-# static libraries use LIBADD for extra libraries not LDADD
-# while executables uses LDADD for extra libraries and LDFLAGS for -l libraries
+In automake:
 
+```
+lib_LIBRARIES - installs into libdir
+pkglib_LIBRARIES - installs into libdir/package-name
+noinst_LIBRARIES - will not be installed
+```
+
+Static libraries uses `LIBADD` for extra libraries, not `LDADD`. Executables uses `LDADD` for extra libraries and `LDFLAGS` for `-l` libraries.
 
 ---
 
@@ -378,5 +477,3 @@ git subtree add --prefix argparse https://github.com/cofyc/argparse.git master -
 
 fcntl -> File control
 pcntl -> Process control
-
-https://github.com/cofyc/argparse
