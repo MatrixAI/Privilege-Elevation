@@ -9,7 +9,8 @@
 #include "argparse.h"
 #include "baudrates.h"
 
-int set_tty_attribs (int fd, speed_t speed) {
+int
+set_tty_attribs (int fd, speed_t speed) {
 
     // get the current attributes
     struct termios tty_attribs;
@@ -56,7 +57,8 @@ int set_tty_attribs (int fd, speed_t speed) {
 
 }
 
-speed_t select_baud (unsigned int selected_baud) {
+speed_t
+select_baud (unsigned int selected_baud) {
 
     speed_t baud;
     #define BAUDDEFAULT(TARGET) default: TARGET = 9600;
@@ -65,7 +67,8 @@ speed_t select_baud (unsigned int selected_baud) {
 
 }
 
-int main(int argc, const char * * argv) {
+int
+main (int argc, const char * * argv) {
 
     static const char * const command_usage[] = {
         "open-serial-device [options] [--] <serial-port-path> <unix-domain-socket-path>",

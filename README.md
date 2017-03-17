@@ -477,3 +477,57 @@ Static libraries uses `LIBADD` for extra libraries, not `LDADD`. Executables use
 
 fcntl -> File control
 pcntl -> Process control
+
+---
+
+The `privilege-elevation.c` is the main entry point for this program. It starts by registering a cleanup and exit routine that only executes on normal exits.
+
+Then it assumes 2 options:
+
+1. The baud rate 
+2. The serial port path
+
+It uses the argparse library to do this.
+
+It requires copying the argv into the heap, and then making argparse process that in-memory in the heap.
+
+The result is an `argv_` that contains all the remaining positional parameters. The options would have already been assign by reference.
+
+Then we get the serial port passed in as the first parameter.
+
+Then we setup our unix domain socket name as `socket.sock`.
+
+We ask the OS what the temporary directories is. If it doesn't exist, we assume `/tmp`.
+
+Now we create a temporary directory in the temporary directories.
+
+This involves first declaring a stack array with the size specified by the `UNIX_PATH_MAX` while minusing the socket name, and +1 for the null byte.
+
+We assign into the name template using `snprintf`.
+
+Using the template, we then run `mkdtemp` to create the temporary directory.
+
+We copy the resulting directory string to a file-global static variable, this is so that the cleanup action can clean it up when we exit.
+
+Then the unix socket path is a combination of the unix socket directory and the socket name.
+
+Now we create the type for the unix socket.
+
+We use the `socket` call to give us back a unix socket file descriptor.
+
+We use file control library to set the unix socket descriptor to non-blocking. This is because we don't want to be blocked when we run `accept` on the socket. The current process will act like a server to the socket, while the libexec `open-serial-device.c` child program wil be the client to the socket.
+
+Then we can bind the file descriptor to our unix socket structure type.
+
+Now we begin to listen to the socket. The socket is now available for the clients to connect to it, however since we are not yet accepting, they will be blocked on connection establishment.
+
+Now we use XSTR to bring the PKEXEC_PATH macro into `pkexec_path` and `pkexec_name`. We apply` basename` to `pkexec_name` as this will be used for the child process name.
+We apply the same thing to the `mechanism_path`.
+
+Now we begin by setting up an array of 2 pipe file descriptors. We create a pipe using the `pipe` call, and we get the `0` fd and the `1` fd.
+
+Before we go on, we add SIGCHLD to the list of signals being blocked. This is because a SIGCHLD will be emitted in case the child dies, as the parent, we can receive this signal and handle it specially.
+
+Next we register a handler for the SIGCHLD signal. We need to receive the extra information about the child, but we don't care about continuing or stopped child processes. This involves setting up a struct called signal action, when registering it against SIGCHLD.
+
+Now we must perform the privilege elevation task. We need to first try to launch the mechanism in an unprivileged manner first, and only if this fails, do we attempt to elevate our privileges. We can do this by assigning to launch aspect as a function, and performing the function call, capture the exception, and relaunch it with extra privileges.

@@ -3,18 +3,21 @@
 #include <stddef.h>     // NULL
 #include <stdbool.h>    // bool, true, false
 #include <string.h>     // size_t, strcmp(), strcpy()
-#include <unistd.h>     // read(), write(), fork(), exec()
+#include <unistd.h>     // read(), write(), fork(), exec(), getpid(), getppid()
 #include <errno.h>      // perror()
 #include <sysexits.h>   // EX_USAGE, EX_CANTCREAT, EX_UNAVAILABLE
 #include <ftw.h>        // nftw()
 #include <libgen.h>     // basename()
 #include <assert.h>     // assert()
+#include <fcntl.h>      // fcntl()
 #include <sys/socket.h> // PF_UNIX, SOCK_STREAM, socklen_t, struct ucred, socket(), bind(), listen(), accept(), getsockopt
 #include <sys/un.h>     // UNIX_PATH_MAX, struct sockaddr_un
 #include <sys/types.h>  // pid_t
 #include <sys/wait.h>   // waitpid()
 #include <sys/select.h> // pselect()
-#include <signal.h>     // sigset_t, struct sigaction, sigemptyset(), sigaddset(), sigprocmask(), sigaction()
+#include <sys/prctl.h>  // PR_SET_PDEATHSIG, prctl()
+#include <signal.h>     // SIGCHLD, SIGTERM, sigset_t, struct sigaction, sigemptyset(), sigaddset(), sigprocmask(), sigaction()
+
 #include "argparse.h"
 
 #define STR(s) #s
@@ -104,7 +107,61 @@ static void handle_mechanism_process (int signal, siginfo_t * signal_info, void 
 
 }
 
-int main(int argc, char * * argv) {
+int
+launch_mechanism (char const * process_path, char const * process_arguments[], int exec_pipe[2]) {
+
+  pid_t parent_pid = getpid();
+  pid_t mechanism_pid = fork();
+
+  if (mechanism_pid == -1) {
+
+    perror("fork()");
+
+  } else if (mechanism_pid == 0) {
+
+    // close the read side in the child
+    close(exec_pipe[0]);
+
+    // if the parent dies, we want the child to commit suicide
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) {
+      // if the parent had died, this would result in a SIGPIPE
+      // which close the parent process as well
+      write(exec_pipe[1], &errno, sizeof(errno));
+      exit(EX_OSERR);
+    }
+
+    // what if the parent already died!? If so we must die
+    // since there's no parent, there's no point writing to the exec pipe
+    if (getppid() != parent_pid) {
+      exit(EX_UNAVAILABLE);
+    }
+
+    // set the write side to close if the subsequent exec works
+    // this doesn't guarantee that the mechanism process succeeds
+    if ((fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC)) == -1) {
+      write(exec_pipe[1], &errno, sizeof(errno));
+      exit(EX_OSERR);
+    }
+
+    // execute the process with the arguments
+    // the child process can access file descriptors in the parent
+    // however we need to pass file descriptors from the child to the parent
+    // so we'll be using unix domain sockets for communication
+    execv(process_path, process_arguments);
+    // exec failed, we must write the errno into the pipe
+    write(exec_pipe[1], &errno, sizeof(errno));
+    // exit the child process
+    exit(EX_UNAVAILABLE);
+
+  }
+
+  return mechanism_pid;
+
+}
+
+
+int
+main (int argc, char * * argv) {
 
     atexit(cleanup_and_exit);
 
@@ -215,13 +272,9 @@ int main(int argc, char * * argv) {
     char pkexec_path[] = XSTR(PKEXEC_PATH);
     char pkexec_name[] = XSTR(PKEXEC_PATH);
     pkexec_name = basename(pkexec_name);
-    char mechanisms_path[] = XSTR(MECHANISM_PATH);
-    char mechanisms_name[] = "open-serial-device";
-
-    // setup a pipe for between parent and forked child process
-    // to communicate errors during the fork prior to the exec
-    int exec_errno_pipefd[2];
-    pipe(exec_errno_pipefd);
+    char mechanism_path[] = XSTR(MECHANISM_PATH);
+    char mechanism_name[] = XSTR(MECHANISM_PATH);
+    mechanism_name = basename(mechanism_name);
 
     // block SIGCHLD in addition to any existing signals being blocked
     sigset_t signal_sigchld_mask;
@@ -244,152 +297,124 @@ int main(int argc, char * * argv) {
         exit(EX_OSERR);
     }
 
+
+    // setup a pipe for between parent and forked child process
+    // to communicate errors during the fork prior to the exec
+    int exec_pipe[2];
+    if (pipe(exec_pipe) != 0) {
+      perror("pipe()");
+      exit(EX_OSERR);
+    }
+
     // attempt unprivileged open-serial-device
     // if we already have the permissions, this is enough to open the serial device
-    // however if we lack the permissions, then we will attempt privilege elevatation with pkexec
-    pid_t mechanism_pid = fork();
+    // if we lack the permissions, then we will attempt privilege elevation with pkexec
+    char * mechanism_args[] = {
+      mechanisms_name,
+      serial_port,
+      unix_sock_path,
+      (char *) NULL
+    };
+
+    int mechanism_pid = launch_mechanism(mechanism_path, mechanism_args, exec_pipe);
 
     if (mechanism_pid == -1) {
-
-        perror("fork()");
-        exit(EX_OSERR);
-
-    } else if (mechanism_pid == 0) {
-
-        // child is only writing
-        close(exec_errno_pipefd[0]);
-
-        // set close-on-exec flag using fcntl on the writing end
-        // this means if execl succeeds, the pipe will be closed
-        // signaling to the parent that it succeeded executing the mechanism
-        // however this does not guarantee that the mechanism actually succeeds
-        fcntl(exec_errno_pipefd[1], F_SETFD, FD_CLOEXEC);
-
-
-        // it's possible for the execed child process to access the file descriptor
-        // as long as you progagate the child descriptor number to the execed child process
-        // it can use fdopen(...)
-        // this allows the execed process and not just the forked process to talk back to the parent process
-        // however, while this can be used for child -> parent communication
-        // and parent -> child communication
-        // this requires the parent to establish 3 pipefds and redirect the stdin and stdout and potentially stderr to the pipefds
-        // regardless the execed process will inherit the parent process's stdin, stdout, and stderr for all file descriptors
-
-        // try to first execute it in an unprivileged way
-        // open-serial-device <serial-port-path> <unix-domain-socket-path>
-        execl(mechanisms_path, mechanisms_name, serial_port, unix_sock_path, (char *) NULL);
-
-        // if we get here, execl failed, we can write the errno for execl failure
-        // errno is defined to be of size int, we can write each byte into the pipe
-        write(exec_errno_pipefd[1], &errno, sizeof(errno));
-        exit(EX_UNAVAILABLE);
-
+      perror("launch_mechanism()");
+      exit(EX_OSERR);
     }
 
-    // parent is only reading
-    close(exec_errno_pipefd[1]);
+    // close the write end on the parent
+    close(exec_pipe[1]);
 
+    // this blocks until we either receive a close or an actual write
+    // on close, the size of the read will be 0
+    // on write, the size of the read will be > 0
+    // we use close to mean successful exec
+    // we use write to mean there was an error
     int exec_errno;
-    if (read(exec_errno_pipefd[0], &exec_errno, sizeof(exec_errno)) > 0) {
-
-        // the mechanism was never executed
+    if (read(exec_pipe[0], &exec_errno, sizeof(exec_errno)) > 0) {
         fprintf(stderr, "Could not execute the mechanism.\n");
         fprintf(stderr, "execl(): %s\n", strerror(exec_errno));
-        close(exec_errno_pipefd[0]);
         exit(EX_UNAVAILABLE);
-
     }
 
-    // execl succeeded, the pipe is no longer needed
-    close(exec_errno_pipefd[0]);
+    // exec succeeded, close the read end
+    close(exec_pipe[0]);
 
-    // the mechanism has been execed
-    // now need to listen for 2 things:
-    // 1. a SIGCHLD signal for if the child process exits without writing the unix domain socket
-    // 2. a message from the unix domain socket about what happened
-    // either the opening succeeded or it failed
-    // if it failed, it could fail due to no permissions available to read
-    // if that happens, an exit code should be used to communicate this, and SIGCHLD needs to be handled
-    // if it succeeded, the file descriptor should be passed via the unix domain socket
-    // otherwise a SIGCHLD with something else could indicate a different error!
-    // so actually 3 conditions:
-    // SIGCHLD
-    // unix file descriptor value (and then SIGCHLD)
-    // once we receive the file descriptor, the child process can exit, and we don't really care about it
-    // we have got what we want!
+    // now we have 2 ways of receiving information about the mechanism
+    // if the mechanism is broken, we'll receive information via SIGCHLD
+    // if the mechanism works, we'll receive information via the socket
+    // in both cases, there are errors to handle
+    // we may receive information from both at the same time
+    // at one point receiving info via the socket, and then receive a SIGCHLD signal
+    // the only success signal we assume from SIGCHLD is a normal exit
+    // anything else indicates an error, and that we should exit the program
+    // the mechanism will communicate either a successful FD
+    // or it communicates a permission error
+    // if it is a permission error, we restart the child process with elevation
+    // in this way, the socket is always used for normal operations
+    // while the SIGCHLD handler is used for exceptions
+    // cleanup will not occur under an async safe exit for the SIGCHLD
+    // the only way to resolve this is via signalfd or libuv
 
+    // use pselect to resolve the race condition between SIGCHLD and the socket
+    // pselect will block until the unix domain socket has pending data
+    // or until it interrupted by a signal such as SIGCHLD
+    // it works because we jump into kernel-space avoiding the race
+    // between sigprocmask and select
 
-    // the best solution appears to be pselect
     // it appears to be an alternative to the self-pipe trick
     // however pselect is not as portable as the self-pipe trick
     // this article explains the main problem: https://lwn.net/Articles/176911/
-
-    // mechanism's unix socket address
-    struct sockaddr_un unix_peer_addr = {0};
-    socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
-
     // this is the socket we have to listen on...
     // accept(unix_sock_fd (struct sockaddr *) &unix_peer_addr, &unix_peer_addr_size) != -1
-    // at the same time if we receive other signals, we must propagate these to these to the children?
-    // pselect will block until the unix domain socket has pending or until it is interrupted by a signal
-    // the signal we are looking for is SIGCHLD, but other signals could interrupt it as well
-    // here we do not have a timeout
+
+
+    // listen on unix_sock_fd for pending connections
     fd_set readfds;
     FD_ZERO(&readfds);
     FD_SET(unix_sock_fd, &readfds);
 
-    // unmask SIGCHLD, allowing it to be handled during the pselect call
-    // pselect works here because we jump into kernel-space, resolving the race-condition between a sigprocmask and select
-    if (pselect(1, &readfds, NULL, NULL, NULL, &signal_current_mask) == -1) {
+    while (1) {
+      // unmask SIGCHLD, allowing it to be handled during the pselect call
+      // remember that the signal_current_mask didn't have SIGCHLD set on it
+      int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_current_mask);
+      if ($status == -1) {
         perror('pselect()');
         exit(EX_OSERR);
+      } else if ($status == 0) {
+        // this branch shouldn't be possible
+        // unless a signal interrupt causes pselect to finish
+        // but means none of the file descriptors are available
+        // this means we shall continue to listen
+        // but the signal handlers may decide to exit this program
+        continue;
+      } else {
+        // break if we have pending connection on the unix sock fd
+        if (FD_ISSET(unix_sock_fd, &readfds)) {
+          break;
+        }
+      }
     }
 
-    // permanently unmask the SIGCHLD, allowing it to be handled
+    // should we unmask the SIGCHLD here?
+    // permanently unmask the SIGCHLD, allowing it to interrupt us
+    // it always represents an error except for a successful exit
+    // I think this should be done, because the child may die, and we want to be interrupted
+    // at any point for the SIGCHLD signal
     if (sigprocmask(SIG_SET, &signal_current_mask, NULL) != -1) {
         perror("sigprocmask()");
-        // if we exit here, how do we propagate the exit to the child process?
         exit(EX_OSERR);
     }
 
-    // so this means either we got a connection attempt from the unix domain socket
-    // or that we got interrupted by SIGCHLD, or another signal
-    // if SIGCHLD, we need to deal with this
-    // if another signal, do we just exit here?
-
-    // also since the listening socket is non-blocking, we can accept the connection
-    // but the client may have disconnected prior to doing so, if the client disconnects
-    // we should also exit, because the client shouldn't be doing such a thing!
-
-
-
-    int mechanism_status;
-    while (waitpid(mechanism_pid, &mechanism_status, WNOHANG) == 0 && accept(unix_sock_fd, (struct sockaddr *) &unix_peer_addr, &unix_peer_addr_size) == -1) {
-        sleep(1);
-    }
-
-
-    // I DON'T like the above solution...
-    // An alternative is: http://stackoverflow.com/a/29245438/582917
-    // another alternative is to use pselect: http://stackoverflow.com/a/29245576/582917
-    // Basically we need a SIGCHLD signal handler
-    // The signal handler should write to another pipe
-    // Then a select can select on both this pipe and the unix domain socket file descriptor
-    // Anyway, SIGCHLD will be received by the parent, when the child's process status changes
-    // HOWEVER, how does interact in the case where execl() simply failed?
-    // Wouldn't SIGCHLD also be initiated if execl failed?
-    // If we do this and SIGCHLD does activate, we must check that the status IS not of one the process status
-    // OR another way would be to just rely on SIGCHLD pipe, and then differentiate the exit status codes between execl failure and mechanism process failure
-
-    // The problem is this:
-    // We need to handle 3 return types.
-    // 1. When the execl failed - just exit
-    // 2. When the execl succeeded by the process failed - handle the process failure
-    // 3. When the execl succeeded, the process succeeded is attempting to connect to the unix domain socket - accept the connection
-    // I feel like all 3 should be some sort of file descriptor to select on
+    // mechanism's unix socket address (an accepted connection to the mechanism)
+    struct sockaddr_un unix_peer_addr = {0};
+    socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
 
     // accept the connection from the child process
     // we only expect 1 connection, so there's no forking the connection handler
+    // this doesn't need to be non-blocking, since I'm only expecting one connection
+    // and I have nothing else to do, so should I remove the fcntl on unix_sock_fd?
     int unix_peer_fd = accept(unix_sock_fd, (struct sockaddr *) &unix_peer_addr, &unix_peer_addr_size);
 
     if (unix_peer_fd == -1) {
@@ -397,10 +422,10 @@ int main(int argc, char * * argv) {
         exit(EXIT_FAILURE);
     }
 
+    // once we have accepted a connection, we don't need to listen anything else
     close(unix_sock_fd);
 
     // check if the peer is the PID that we intended to launch
-
     struct ucred peer_credentials;
     int peer_credentials_size = sizeof(peer_credentials);
 
@@ -414,9 +439,8 @@ int main(int argc, char * * argv) {
         exit(EXIT_FAILURE);
     }
 
-    // ok now receive the file descriptor from the mechanism
-
-
-
+    // now receive the file descriptor from the mechanism
+    // or an error message indicating permission error
+    // if we receive a permission error, we must retry with elevated permissions
 
 }
