@@ -241,7 +241,7 @@ main (int argc, char * * argv) {
     };
 
     // initialise a new socket
-    int unix_sock_fd = socket(PF_UNIX, SOCK_STREAM, 0);
+    int unix_sock_fd = socket(PF_UNIX, SOCK_DGRAM, 0);
     if (unix_sock_fd < 0) {
         perror("socket()");
         exit(EX_OSERR);
@@ -378,18 +378,14 @@ main (int argc, char * * argv) {
     while (1) {
       // unmask SIGCHLD, allowing it to be handled during the pselect call
       // remember that the signal_current_mask didn't have SIGCHLD set on it
+      // we don't need a timeout on this, as we can receive SIGCHLD to tell us to exit
       int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_current_mask);
-      if ($status == -1) {
-        perror('pselect()');
-        exit(EX_OSERR);
-      } else if ($status == 0) {
-        // this branch shouldn't be possible
-        // unless a signal interrupt causes pselect to finish
-        // but means none of the file descriptors are available
-        // this means we shall continue to listen
-        // but the signal handlers may decide to exit this program
-        continue;
-      } else {
+      if (status == -1) {
+        if (errno != EINTR) {
+          perror('pselect()');
+          exit(EX_OSERR);
+        }
+      } else if (status > 0) {
         // break if we have pending connection on the unix sock fd
         if (FD_ISSET(unix_sock_fd, &readfds)) {
           break;
@@ -397,11 +393,8 @@ main (int argc, char * * argv) {
       }
     }
 
-    // should we unmask the SIGCHLD here?
     // permanently unmask the SIGCHLD, allowing it to interrupt us
     // it always represents an error except for a successful exit
-    // I think this should be done, because the child may die, and we want to be interrupted
-    // at any point for the SIGCHLD signal
     if (sigprocmask(SIG_SET, &signal_current_mask, NULL) != -1) {
         perror("sigprocmask()");
         exit(EX_OSERR);
@@ -413,31 +406,66 @@ main (int argc, char * * argv) {
 
     // accept the connection from the child process
     // we only expect 1 connection, so there's no forking the connection handler
-    // this doesn't need to be non-blocking, since I'm only expecting one connection
-    // and I have nothing else to do, so should I remove the fcntl on unix_sock_fd?
+    // since it is non-blocking, this would fail as soon as there's no pending connections
+    // but our pselect call tells us there's a connection
+    // if that connection request is dropped while reaching here
+    // then that's an exception!
     int unix_peer_fd = accept(unix_sock_fd, (struct sockaddr *) &unix_peer_addr, &unix_peer_addr_size);
 
     if (unix_peer_fd == -1) {
+      if (errno == EAGAIN || errno == EWOULDBLOCK) {
         perror("accept()");
-        exit(EXIT_FAILURE);
+        exit(EX_UNAVAILABLE);
+      } else {
+        perror("accept()");
+        exit(EX_OSERR);
+      }
     }
 
     // once we have accepted a connection, we don't need to listen anything else
     close(unix_sock_fd);
+    // and unlink the socket file
 
     // check if the peer is the PID that we intended to launch
-    struct ucred peer_credentials;
+    struct ucred peer_credentials = {0};
     int peer_credentials_size = sizeof(peer_credentials);
 
     if (getsockopt(unix_peer_fd, SOL_SOCKET, SO_PEERCRED, &peer_credentials, &peer_credentials_size) != 0) {
-        perror("getsockopt()");
-        exit(EXIT_FAILURE);
+      perror("getsockopt()");
+      exit(EX_OSERR);
     }
 
     if (peer_credentials.pid != mechanism_pid) {
-        printf("The connecting peer's PID did not match the launched mechanism PID\n");
-        exit(EXIT_FAILURE);
+      printf("The connecting peer's PID did not match the launched mechanism PID\n");
+      exit(EX_PROTOCOL);
     }
+
+    // i need to read on 2 kinds of messages
+    // one is a permission error message
+    // another is the file descriptor message
+    // now that we are using the unix domain datagram socket
+    // this means our messages is atomic, so the writer can't possibly write half a message
+    // however we now need a message protocol
+    // we can do this by doing
+    // { enum { PERMERR, PRIVFD }, int data }
+    // the above struct type should be kept in a header
+    // both the server and the client includes this header as a shared protocol
+    // the server now performs a pselect
+    // on the connected socket, and then uses recvmsg to acquire the message
+    // and it needs to switch on the 2 different messages
+    // apparently the client program also in order to connect to our unix domain socket
+    // it must create its own unix domain socket
+    // in the same temporary directory
+    // it will then bind to it (creating the file), and then connect it to the server socket
+    // the client program should be able to unlink the socket file as soon as it has binded to it
+    // the server program should be able to unlink the its socket file as soon as it received a connection
+    // ... however, the problem is that we may expecting a privileged invocation
+    // this means we may need to reuse the socket, so we cannot delete or even close the socket
+    // until we are sure that we have the file descriptor, or we are exiting out of the program completely
+    //http://www.techdeviancy.com/uds.html
+
+
+
 
     // now receive the file descriptor from the mechanism
     // or an error message indicating permission error
