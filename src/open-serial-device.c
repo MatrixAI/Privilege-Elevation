@@ -8,6 +8,7 @@
 #include <termios.h> // all the tty control functions
 #include "argparse.h"
 #include "baudrates.h"
+#include "protocol.h"
 
 int
 set_tty_attribs (int fd, speed_t speed) {
