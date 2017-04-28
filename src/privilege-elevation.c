@@ -389,31 +389,42 @@ main (int argc, char * * argv) {
     // do something with unix_peer_fd
     // read a message
 
-    int send_fd, available_ancillary_element_buffer_space;
-    struct msghdr socket_message = {0};
 
-    struct iovec io_vector[1];
-    struct cmsghdr *control_message = NULL;
+    MechanismProto message_buffer[1] = {0};
 
-    // why an array of 1 char?
-    // why not just 1 char?
-    char message_buffer[1];
+    struct iovec io_vector[1] = {
+      {
+        .iov_base = message_buffer,
+        .iov_len = sizeof(message_buffer)
+      }
+    };
 
-    // can we shorten this to {0}?
-    // struct initialisation for array of chars?
-    char ancillary_element_buffer[CMSG_SPACE(sizeof(int))];
-    memset(ancillary_element_buffer, 0, CMSG_SPACE(sizeof(int)));
+    char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
 
-    /* setup a place to fill in message contents */
-    io_vector[0].iov_base = message_buffer;
-    io_vector[0].iov_len = 1;
+    struct msghdr socket_options = {0};
+    socket_options.msg_iov = io_vector;
+    socket_options.msg_iovlength = sizeof(io_vector);
+    socket_options.msg_control = ancillary_buffer;
+    socket_options.msg_controllen = sizeof(ancillary_buffer);
 
-    socket_message.msg_iov = io_vector;
-    socket_message.msg_iovlen = 1;
+    struct cmsghdr * control_message = NULL;
 
-    /* provide space for the ancillary data */
-    socket_message.msg_control = ancillary_element_buffer;
-    socket_message.msg_controllen = CMSG_SPACE(sizeof(int));
+
+    // in a SOCK_DGRAM
+    // it is connection less
+    // so there is no connection to listen to
+    // you just bind to the socket, and start reading or sending data
+    // in the same way, there's no connect on the client side
+    // it also needs to bind to the same socket
+    // so we need to remove the listen part
+    // because a SOCK_DGRAM is more suited to this type of network architecture
+    // we can still use the same recvmessage
+    // we are just relying on C to typecast the received message as the MechanismProto
+    // and we are done!
+
+
+
+
 
     // i still have a signal mask
     // i need to allow that to occur (so I can catch the possibly of the mechanism failing)
