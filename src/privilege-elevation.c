@@ -30,6 +30,9 @@
 
 static char unix_sock_dir[UNIX_PATH_MAX] = {0};
 
+static int unix_sock_fd = 0;
+static int unix_peer_fd = 0;
+
 static volatile sig_atomic_t received_from_mechanism_socket = 0;
 static volatile sig_atomic_t error_from_mechanism_signal = 0;
 
@@ -50,10 +53,10 @@ ntfw_callback (const char * path, const struct stat * sb, int type_flag, struct 
 
 static void cleanup_and_exit () {
 
+    if (unix_peer_fd) close(unix_peer_fd);
+    if (unix_sock_fd) close(unix_sock_fd);
     if (unix_sock_dir && *unix_sock_dir) {
-
         ntfw(unix_sock_dir, ntfw_callback, 64, FTW_DEPTH | FTW_PHYS);
-
     }
 
 }
@@ -104,6 +107,7 @@ launch_mechanism (char const * process_path, char const * process_arguments[], i
 
     // set the write side to close if the subsequent exec works
     // this doesn't guarantee that the mechanism process succeeds
+    // only that the fork + exec worked
     if ((fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC)) == -1) {
       write(exec_pipe[1], &errno, sizeof(errno));
       exit(EX_OSERR);
@@ -114,6 +118,7 @@ launch_mechanism (char const * process_path, char const * process_arguments[], i
     // however we need to pass file descriptors from the child to the parent
     // so we'll be using unix domain sockets for communication
     execv(process_path, process_arguments);
+
     // exec failed, we must write the errno into the pipe
     write(exec_pipe[1], &errno, sizeof(errno));
     // exit the child process
@@ -206,16 +211,9 @@ main (int argc, char * * argv) {
     };
 
     // initialise a new socket
-    int unix_sock_fd = socket(PF_UNIX, SOCK_DGRAM, 0);
+    unix_sock_fd = socket(PF_UNIX, SOCK_DGRAM, 0);
     if (unix_sock_fd < 0) {
         perror("socket()");
-        exit(EX_OSERR);
-    }
-
-    // set the listening socket to non-blocking
-    // because: http://stackoverflow.com/a/3444832/582917
-    if (fcntl(unix_sock_fd, F_SETFL, (fcntl(unix_sock_fd, F_GETFL, 0) | O_NONBLOCK)) == -1) {
-        perror("fcntl()");
         exit(EX_OSERR);
     }
 
@@ -232,7 +230,15 @@ main (int argc, char * * argv) {
         exit(EX_OSERR);
     }
 
-    // setup the execution paths
+    // set the listening socket to non-blocking
+    // this allows us to use select to multiplex checking for child process termination or connection
+    if (fcntl(unix_sock_fd, F_SETFL, (fcntl(unix_sock_fd, F_GETFL, 0) | O_NONBLOCK)) == -1) {
+        perror("fcntl()");
+        exit(EX_OSERR);
+    }
+
+    // setup the executable paths
+    // the paths will be used for execution, while the names will be used for process names
     // basename mutates its parameter, so we need to duplciate it
     char pkexec_path[] = XSTR(PKEXEC_PATH);
     char pkexec_name[] = XSTR(PKEXEC_PATH);
@@ -246,7 +252,7 @@ main (int argc, char * * argv) {
     sigset_t signal_current_mask;
     sigemptyset(&signal_sigchld_mask);
     sigaddset(&signal_sigchld_mask, SIGCHLD);
-    if (sigprocmask(SIG_BLOCK, &signal_sigchld_mask, &signal_current_mask) != -1) {
+    if (sigprocmask(SIG_BLOCK, &signal_sigchld_mask, &signal_current_mask) != 0) {
         perror("sigprocmask()");
         exit(EX_OSERR);
     }
@@ -261,7 +267,6 @@ main (int argc, char * * argv) {
         perror('sigaction()');
         exit(EX_OSERR);
     }
-
 
     // setup a pipe for between parent and forked child process
     // to communicate errors during the fork prior to the exec
@@ -335,37 +340,40 @@ main (int argc, char * * argv) {
 
     }
 
-    // we don't need this anymore until we check again on the accept
-    /* // permanently unmask the SIGCHLD, allowing it to interrupt us */
-    /* // it always represents an error except for a successful exit */
-    /* if (sigprocmask(SIG_SET, &signal_current_mask, NULL) != -1) { */
-    /*     perror("sigprocmask()"); */
-    /*     exit(EX_OSERR); */
-    /* } */
+    // permanently unmask the SIGCHLD, allowing it to interrupt
+    // at this point we can check for the 
+    if (sigprocmask(SIG_SET, &signal_current_mask, NULL) != 0) {
+        perror("sigprocmask()");
+        exit(EX_OSERR);
+    }
 
     struct sockaddr_un unix_peer_addr = {0};
     socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
 
-    int unix_peer_fd = accept(
-      unix_sock_fd,
-      (struct sockaddr *) &unix_peer_addr,
-      &unix_peer_addr_size
-    );
+    unix_peer_fd = accept(unix_sock_fd, (struct sockaddr *) &unix_peer_addr, &unix_peer_addr_size);
 
+    // if this fails, accept failed even though pselect told us there was a pending connection
+    // this is just abnormal error, we just fail here
+    // in other cases, a supervisor may recover from this error
     if (unix_peer_fd == -1) {
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         perror("accept()");
         exit(EX_UNAVAILABLE);
       } else {
-        perror("accept()");
-        exit(EX_OSERR);
+        if (errno == EINTR) {
+          if (error_from_mechanism_signal) {
+            perror('handle_mechanism_process()');
+            exit(EX_UNAVAILABLE);
+          }
+        } else {
+          perror('accept()');
+          exit(EX_OSERR);
+        }
       }
     }
 
-    // accepted a connection, don't need to listen anymore
-    close(unix_sock_fd);
-    // and unlink the socket file
-    // don't do this because we may still need it for privileged invocation
+    // accepted a connection
+    // we still need the socket in case we need to elevate permissions
 
     // check if the peer is the PID that we intended to launch
     struct ucred peer_credentials = {0};
@@ -381,14 +389,13 @@ main (int argc, char * * argv) {
       exit(EX_PROTOCOL);
     }
 
+    // file descriptors are passed as ancillary data
+    // so we just a typed message indicating whether we have ancillary data
+    // or that we lost permissions to acquire the data
+
     // how do we combine the unix fd message type with our own type?
     // is unix_peer_fd an actual Unix Domain Socket now?
     // or it still something else?
-
-
-    // do something with unix_peer_fd
-    // read a message
-
 
     MechanismProto message_buffer[1] = {0};
 

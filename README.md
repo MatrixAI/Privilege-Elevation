@@ -1,6 +1,21 @@
 Privilege-Elevation
 ===================
 
+---
+
+1. parse the arguments
+2. create a temporary directory for the unix domain socket?
+3. then using the directory, we acquire the path the unix domain socket
+4. initialise the socket, we use the sock address family
+5. create a PF_UNIX SOCK_DGRAM, we use a datagram socket so we get actual atomic messages, rather than just a byte stream
+6. the socket is set to to non-blocking, we will be using it for listening, so that means it a listening socket for acquiring client connection file descriptors
+7. bind to the socket, listen on the socket for a backlog of 1 client
+8. because the socket is non-blocking, trying to select on the listening socket, can allow us to set up an event loop, and do other things while the socket didn't have any listeners, in this case, we're only listening but the important thing is that the parent can decide to exit if it detects that the child process has died...
+9. the usage of select on a non-blocking socket, basically makes what what used to be blocking into somethat is blocking now, so there's flexibility here
+10. The reason why you need pselect is because you need to make sure SIGCHLD is blocked UNTIL select is called, because after select is where you have the signal handling logic, specifically for the master process (your signal action should just set some volatile variable to then be communicated to the parent context. That also means after pselect is finished, you want to unblock the signal in case it's necessary. HOWEVER, because we are running accept after pselect, we should only unblock after (or just before accept), because the point being that we can handle the signal failure here too after the accept call.
+
+---
+
 Development:
 
 Run `./bootstrap`.
