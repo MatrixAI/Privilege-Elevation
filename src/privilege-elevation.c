@@ -384,6 +384,14 @@ main (int argc, char * * argv) {
       exit(EX_OSERR);
     }
 
+    // I don't think this works with datagram sockets, datagram sockets are unlikely to have any kind of peer credentials
+    // our message is so small, it should fit atomically into 1 byte
+    // then we don't need to worry about partial sends or partial writes
+    // and we can keep using peercred to ensure that the correct child process is the one sending data!!
+    // woo!
+    // even then, we STILL USE sendmsg and recvmsg
+    // and we can use pselect as well...
+    // since we still need to deal with signal failure in multiple areas
     if (peer_credentials.pid != mechanism_pid) {
       printf("The connecting peer's PID did not match the launched mechanism PID\n");
       exit(EX_PROTOCOL);
@@ -397,8 +405,13 @@ main (int argc, char * * argv) {
     // is unix_peer_fd an actual Unix Domain Socket now?
     // or it still something else?
 
+    // so we'll use the sendmsg and recvmsg pair
+    // these 2 allow us to setup a msghdr (really just a message)
+    // that will contain both the custom type we have, along with the ancillary data
+
     MechanismProto message_buffer[1] = {0};
 
+    // this will store the actual message
     struct iovec io_vector[1] = {
       {
         .iov_base = message_buffer,
@@ -406,16 +419,19 @@ main (int argc, char * * argv) {
       }
     };
 
+    // buffer for the ancillary data (the file descriptor)
     char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
 
-    struct msghdr socket_options = {0};
-    socket_options.msg_iov = io_vector;
-    socket_options.msg_iovlength = sizeof(io_vector);
-    socket_options.msg_control = ancillary_buffer;
-    socket_options.msg_controllen = sizeof(ancillary_buffer);
+    // a msghdr is really just the socket options, options for the sendmsg and recvmsg
+    struct msghdr message_options = {0};
+    message_options.msg_iov = io_vector;
+    message_options.msg_iovlength = sizeof(io_vector);
+    message_options.msg_control = ancillary_buffer;
+    message_options.msg_controllen = sizeof(ancillary_buffer);
 
     struct cmsghdr * control_message = NULL;
 
+    
 
     // in a SOCK_DGRAM
     // it is connection less
@@ -428,8 +444,20 @@ main (int argc, char * * argv) {
     // we can still use the same recvmessage
     // we are just relying on C to typecast the received message as the MechanismProto
     // and we are done!
+    // datagram sockets don't have accept and connect semantics
+    // we only have bind, recvmsg and sendmsg semantics right...
+    // OOOOHHHH
+    // however because the socket is nonblocking, we still need to use pselect right to acquire the recvmsg?
 
+    fd_set readfds;
+    FD_ZERO(&readfds);
+    FD_SET(unix_sock_fd, &readfds);
 
+    int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_current_mask);
+
+    if (status == -1) {
+
+    }
 
 
 
