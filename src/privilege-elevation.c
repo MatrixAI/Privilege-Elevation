@@ -362,7 +362,7 @@ main (int argc, char * * argv) {
 
     // attempt unprivileged open-serial-device
     char * mechanism_args[] = {
-      mechanisms_name,
+      mechanism_name,
       serial_port,
       unix_sock_path,
       (char *) NULL
