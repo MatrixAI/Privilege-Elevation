@@ -51,7 +51,8 @@ ntfw_callback (const char * path, const struct stat * sb, int type_flag, struct 
 
 }
 
-static void cleanup_and_exit () {
+static void
+cleanup_and_exit () {
 
     if (unix_peer_fd) close(unix_peer_fd);
     if (unix_sock_fd) close(unix_sock_fd);
@@ -61,14 +62,57 @@ static void cleanup_and_exit () {
 
 }
 
+/**
+ * Blocks SIGCHLD
+ * Will assign by reference the original mask prior to blocking.
+ */
+static int
+block_sigchld (sigset_t * signal_orig_mask) {
+
+  sigset_t signal_sigchld_mask;
+  sigemptyset(&signal_sigchld_mask);
+  sigaddset(&signal_sigchld_mask, SIGCHLD);
+  return (sigprocmask(SIG_BLOCK, &signal_sigchld_mask, signal_orig_mask) == 0);
+
+}
+
+static int
+unblock_sigchld (sigset_t * signal_orig_mask) {
+
+  return (sigprocmask(SIG_SET, signal_orig_mask, NULL) == 0);
+
+}
+
+/**
+ * Assigns a signal handler to SIGCHLD.
+ * This should run after SIGCHLD is first blocked.
+ */
+static int
+handle_sigchld (void (*handler)(void), int flags) {
+
+  struct sigaction signal_action = {0};
+  signal_action.sa_flags = flags;
+  signal_action.sa_sigaction = handler;
+  return (sigaction(SIGCHLD, &signal_action, NULL) == 0);
+
+}
+
+/**
+ * Handles the SIGCHLD from the mechanism process.
+ * It will first check if we have already received from the mechanism.
+ * If not, then it's an error.
+ * But if we have and the signal isn't a successful exit then it's also an error.
+ */
 static void
 handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
   assert(signal == SIGCHLD);
 
-  if (!received_from_mechanism) {
+  if (!received_from_mechanism_socket) {
     error_from_mechanism_signal = 1;
-  } else if (signal_info->si_code != CLD_EXITED || signal_info->si_status != EXIT_SUCCESS) {
+  } else if (
+    signal_info->si_code != CLD_EXITED || signal_info->si_status != EXIT_SUCCESS
+  ) {
     error_from_mechanism_signal = 1;
   }
 
@@ -76,8 +120,37 @@ handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
 }
 
-int
+static int
+check_peer_pid (int peer_sock_fd, int peer_pid) {
+
+  struct ucred peer_credentials = {0};
+  int peer_credentials_size = sizeof(peer_credentials);
+  if (
+      getsockopt(
+                 peer_sock_fd,
+                 SOL_SOCKET,
+                 SO_PEERCRED,
+                 &peer_credentials,
+                 &peer_credentials_size
+                 )
+      != 0
+  ) {
+    return 0;
+  }
+
+  return (peer_credentials.pid == peer_pid);
+
+}
+
+static int
 launch_mechanism (char const * process_path, char const * process_arguments[], int exec_pipe[2]) {
+
+  // setup a pipe for between parent and forked child process
+  // to communicate errors during the fork prior to the exec
+  int exec_pipe[2];
+  if (pipe(exec_pipe) != 0) {
+    return -1;
+  }
 
   pid_t parent_pid = getpid();
   pid_t mechanism_pid = fork();
@@ -126,6 +199,27 @@ launch_mechanism (char const * process_path, char const * process_arguments[], i
 
   }
 
+  if (mechanism_pid == -1) {
+    return -1;
+  }
+
+  // close the write end on the parent
+  close(exec_pipe[1]);
+
+  // this blocks until we either receive a close or an actual write
+  // on close, the size of the read will be 0
+  // on write, the size of the read will be > 0
+  // we use close to mean successful exec
+  // we use write to mean there was an error
+  int exec_errno;
+  if (read(exec_pipe[0], &exec_errno, sizeof(exec_errno)) > 0) {
+    errno = exec_errno;
+    return -1;
+  }
+
+  // exec succeeded, close the read end
+  close(exec_pipe[0]);
+
   return mechanism_pid;
 
 }
@@ -163,6 +257,9 @@ main (int argc, char * * argv) {
         argparse_usage(&argparse);
         exit(EX_USAGE);
     }
+
+    // this is what we want to acquire
+    int serial_port_fd;
 
     // both the selected_baud and serial_port will be passed to open-serial-device
     const char * serial_port = argv_[0];
@@ -211,7 +308,7 @@ main (int argc, char * * argv) {
     };
 
     // initialise a new socket
-    unix_sock_fd = socket(PF_UNIX, SOCK_DGRAM, 0);
+    unix_sock_fd = socket(PF_UNIX, SOCK_STREAM, 0);
     if (unix_sock_fd < 0) {
         perror("socket()");
         exit(EX_OSERR);
@@ -247,32 +344,19 @@ main (int argc, char * * argv) {
     char mechanism_name[] = XSTR(MECHANISM_PATH);
     mechanism_name = basename(mechanism_name);
 
-    // block SIGCHLD in addition to any existing signals being blocked
-    sigset_t signal_sigchld_mask;
-    sigset_t signal_current_mask;
-    sigemptyset(&signal_sigchld_mask);
-    sigaddset(&signal_sigchld_mask, SIGCHLD);
-    if (sigprocmask(SIG_BLOCK, &signal_sigchld_mask, &signal_current_mask) != 0) {
-        perror("sigprocmask()");
-        exit(EX_OSERR);
+    // setup the signal handler for SIGCHLD
+    // this will handle if the child process breaks
+
+    sigset_t signal_orig_mask;
+    if (!block_sigchld(&signal_orig_mask)) {
+      perror("block_sigchld()");
+      exit(EX_OSERR);
     }
 
-    // setup the signal handler for SIGCHLD prior to masking SIGCHLD and spawning the child process
-    // SIGCHLD carries the information about the child process, to make use of it we need to use SA_SIGINFO flag
-    // also we don't care if the child process is suspended and continued, so we also add SA_NOCLDSTOP flag
-    struct sigaction signal_action = {0};
-    signal_action.sa_flags = SA_SIGINFO | SA_NOCLDSTOP;
-    signal_action.sa_sigaction = handle_mechanism_process;
-    if (sigaction(SIGCHLD, &signal_action, NULL) == -1) {
-        perror('sigaction()');
-        exit(EX_OSERR);
-    }
-
-    // setup a pipe for between parent and forked child process
-    // to communicate errors during the fork prior to the exec
-    int exec_pipe[2];
-    if (pipe(exec_pipe) != 0) {
-      perror("pipe()");
+    // SA_SIGINFO for acquiring extra child process info
+    // SA_NOCLDSTOP because we don't care about suspension or continued signals
+    if (!handle_sigchld(handle_mechanism_process, SA_SIGINFO | SA_NOCLDSTOP)) {
+      perror("handle_sigchld()");
       exit(EX_OSERR);
     }
 
@@ -291,24 +375,6 @@ main (int argc, char * * argv) {
       exit(EX_OSERR);
     }
 
-    // close the write end on the parent
-    close(exec_pipe[1]);
-
-    // this blocks until we either receive a close or an actual write
-    // on close, the size of the read will be 0
-    // on write, the size of the read will be > 0
-    // we use close to mean successful exec
-    // we use write to mean there was an error
-    int exec_errno;
-    if (read(exec_pipe[0], &exec_errno, sizeof(exec_errno)) > 0) {
-        fprintf(stderr, "Could not execute the mechanism.\n");
-        fprintf(stderr, "execl(): %s\n", strerror(exec_errno));
-        exit(EX_UNAVAILABLE);
-    }
-
-    // exec succeeded, close the read end
-    close(exec_pipe[0]);
-
     // now we have 2 ways of receiving information about the mechanism
     // if the mechanism is broken, we'll receive information via SIGCHLD
     // if the mechanism works, we'll receive information via the socket
@@ -319,95 +385,75 @@ main (int argc, char * * argv) {
 
     while (1) {
 
-      int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_current_mask);
+      // if 0, then it has timed out but that's not possible here
+      int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_orig_mask);
 
       if (status == -1) {
-        if (errno == EINTR) {
-          if (error_from_mechanism_signal) {
-            perror('handle_mechanism_process()');
-            exit(EX_UNAVAILABLE);
-          }
-        } else {
+
+        // error or interrupt occurred
+        if (errno != EINTR) {
           perror('pselect()');
           exit(EX_OSERR);
         }
+
+        // if we were not interrupted from the mechanism just continue
+        if (error_from_mechanism_signal) {
+          perror('handle_mechanism_process()');
+          exit(EX_UNAVAILABLE);
+        }
+
       } else if (status > 0) {
+
         // break if we have pending connection on the unix sock fd
         if (FD_ISSET(unix_sock_fd, &readfds)) {
           break;
         }
+
       }
 
     }
 
-    // permanently unmask the SIGCHLD, allowing it to interrupt
-    // at this point we can check for the 
-    if (sigprocmask(SIG_SET, &signal_current_mask, NULL) != 0) {
-        perror("sigprocmask()");
-        exit(EX_OSERR);
+    // permanently unmask the SIGCHLD, allowing it to interrupt us
+    if (!unblock_sigchld(&signal_orig_mask)) {
+      perror("unblock_sigchld()");
+      exit(EX_OSERR);
     }
 
     struct sockaddr_un unix_peer_addr = {0};
     socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
 
-    unix_peer_fd = accept(unix_sock_fd, (struct sockaddr *) &unix_peer_addr, &unix_peer_addr_size);
+    // if an asynchronous network error occurs, accept needs to fail immediately
+    // but accept is a slow system call, so it can block indefinitely
+    // to prevent this, unix_sock_fd is set to non blocking
+    unix_peer_fd = accept(
+                          unix_sock_fd,
+                          (struct sockaddr *) &unix_peer_addr,
+                          &unix_peer_addr_size
+                          );
 
-    // if this fails, accept failed even though pselect told us there was a pending connection
-    // this is just abnormal error, we just fail here
-    // in other cases, a supervisor may recover from this error
+    // accept only runs once and doesn't block because unix_sock_fd is non blocking
+    // if we can't accept a connection we just exit
     if (unix_peer_fd == -1) {
+
       if (errno == EAGAIN || errno == EWOULDBLOCK) {
         perror("accept()");
         exit(EX_UNAVAILABLE);
+      } else if (errno = EINTR && error_from_mechanism_signal) {
+        perror('handle_mechanism_process()');
+        exit(EX_UNAVAILABLE);
       } else {
-        if (errno == EINTR) {
-          if (error_from_mechanism_signal) {
-            perror('handle_mechanism_process()');
-            exit(EX_UNAVAILABLE);
-          }
-        } else {
-          perror('accept()');
-          exit(EX_OSERR);
-        }
+        perror('accept()');
+        exit(EX_OSERR);
       }
+
     }
 
-    // accepted a connection
-    // we still need the socket in case we need to elevate permissions
-
-    // check if the peer is the PID that we intended to launch
-    struct ucred peer_credentials = {0};
-    int peer_credentials_size = sizeof(peer_credentials);
-
-    if (getsockopt(unix_peer_fd, SOL_SOCKET, SO_PEERCRED, &peer_credentials, &peer_credentials_size) != 0) {
-      perror("getsockopt()");
-      exit(EX_OSERR);
-    }
-
-    // I don't think this works with datagram sockets, datagram sockets are unlikely to have any kind of peer credentials
-    // our message is so small, it should fit atomically into 1 byte
-    // then we don't need to worry about partial sends or partial writes
-    // and we can keep using peercred to ensure that the correct child process is the one sending data!!
-    // woo!
-    // even then, we STILL USE sendmsg and recvmsg
-    // and we can use pselect as well...
-    // since we still need to deal with signal failure in multiple areas
-    if (peer_credentials.pid != mechanism_pid) {
-      printf("The connecting peer's PID did not match the launched mechanism PID\n");
+    if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
+      perror("check_peer_pid()");
       exit(EX_PROTOCOL);
     }
 
-    // file descriptors are passed as ancillary data
-    // so we just a typed message indicating whether we have ancillary data
-    // or that we lost permissions to acquire the data
-
-    // how do we combine the unix fd message type with our own type?
-    // is unix_peer_fd an actual Unix Domain Socket now?
-    // or it still something else?
-
-    // so we'll use the sendmsg and recvmsg pair
-    // these 2 allow us to setup a msghdr (really just a message)
-    // that will contain both the custom type we have, along with the ancillary data
+    // the accepted connection is not non-blocking
 
     MechanismProto message_buffer[1] = {0};
 
@@ -429,71 +475,77 @@ main (int argc, char * * argv) {
     message_options.msg_control = ancillary_buffer;
     message_options.msg_controllen = sizeof(ancillary_buffer);
 
-    struct cmsghdr * control_message = NULL;
 
-    
+    // we will spin on receiving data from the mechanism
+    // also we shall set that the received file descriptor needs to be closed
+    // if the main process execs (this is for security reasons)
+    do {
+      ssize_t size_read = recvmsg(unix_peer_fd, &message_options, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
+      // 0 bytes may have been read... then what?
+      if (size_read <= 0) {
 
-    // in a SOCK_DGRAM
-    // it is connection less
-    // so there is no connection to listen to
-    // you just bind to the socket, and start reading or sending data
-    // in the same way, there's no connect on the client side
-    // it also needs to bind to the same socket
-    // so we need to remove the listen part
-    // because a SOCK_DGRAM is more suited to this type of network architecture
-    // we can still use the same recvmessage
-    // we are just relying on C to typecast the received message as the MechanismProto
-    // and we are done!
-    // datagram sockets don't have accept and connect semantics
-    // we only have bind, recvmsg and sendmsg semantics right...
-    // OOOOHHHH
-    // however because the socket is nonblocking, we still need to use pselect right to acquire the recvmsg?
+        // should we instead use select/pselect on this instead of just non-blocking recvmsg
+      }
+    } while (size_read <= 0);
 
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(unix_sock_fd, &readfds);
+    if (message_buffer[0].type == PERMERR) {
 
-    int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_current_mask);
+      // we need to restart with privileged access
+      // using polkit to launch mechanism
+      // we need to abstract all of this into a recursive function that retries
+      // this means launching a mechanism again, with the same socket
+      // accepting a connection
+      // reading from the connection
 
-    if (status == -1) {
+      // how to rearchitect this?
+      // it needs to be like a retry monad
+      // a function that recalls itself once when it fails
+
+    } else if (message_buffer[0].type == PRIVFD) {
+
+      // we have the file descriptor, let's get it
+      if ((message_options.msg_flags & MSG_CTRUNC) == MSG_CTRUNC) {
+        fprintf(stderr, "Not enough space provided for ancillary element array");
+        exit(EX_SOFTWARE);
+      }
+
+      // don't we only expect 1 message
+      // why would we iterate over control messages?
+
+      for (struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
+           control_message != NULL;
+           control_message = CMSG_NXTHDR(&message_options, control_message))
+        {
+          if (
+              (control_message->cmsg_level == SOL_SOCKET)
+              &&
+              control_message->cmsg_type == SCM_RIGHTS
+              )
+            {
+              serial_port_fd = *((int *) CMSG_DATA(control_message));
+              break;
+            }
+        }
+
+      if (!serial_port_fd) {
+        fprintf(stderr, "Did not get a file descriptor from the mechanism");
+        exit(EX_SOFTWARE);
+      }
+
+      // is this necessary?
+      shutdown(unix_peer_fd, SHUT_RD | SHUT_WR);
+      close(unix_peer_fd);
+
+      shutdown(unix_sock_fd, SHUT_RD | SHUT_WR);
+      close(unix_sock_fd);
+
+      // try out the serial_port_fd
+      // read from it, and write to it!
+      // whatever!!
 
     }
 
-
-
-    // i still have a signal mask
-    // i need to allow that to occur (so I can catch the possibly of the mechanism failing)
-    // and use pselect on the socket to receive the actual message
-    if (recvmsg (unix_peer_fd, &socket_message, MSG_CMSG_CLOEXEC) < 0) {
-      // fail?
-    }
-
-    // socket_message contains the io_vector which contains the message buffer
-    // what does this mean?
-    // a char is 1 byte
-    // our message buffer is an array of 1 byte!?
-    // why are we use a message header?
-
-
-    // both the server and the client includes this header as a shared protocol
-    // the server now performs a pselect (while unmasking to get the signal as well)
-    // on the connected socket, and then uses recvmsg to acquire the message
-    // and it needs to switch on the 2 different messages
-    // apparently the client program also in order to connect to our unix domain socket
-    // it must create its own unix domain socket
-    // in the same temporary directory
-    // it will then bind to it (creating the file), and then connect it to the server socket
-    // the client program should be able to unlink the socket file as soon as it has binded to it
-    // the server program should be able to unlink the its socket file as soon as it received a connection
-    // ... however, the problem is that we may expecting a privileged invocation
-    // this means we may need to reuse the socket, so we cannot delete or even close the socket
-    // until we are sure that we have the file descriptor, or we are exiting out of the program completely
     //http://www.techdeviancy.com/uds.html
 
-    // now receive the file descriptor from the mechanism
-    // or an error message indicating permission error
-    // if we receive a permission error, we must retry with elevated permissions
-
-    // use MechanismProto
 
 }
