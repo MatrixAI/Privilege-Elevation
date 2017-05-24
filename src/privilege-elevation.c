@@ -33,8 +33,7 @@ static char unix_sock_dir[UNIX_PATH_MAX] = {0};
 static int unix_sock_fd = 0;
 static int unix_peer_fd = 0;
 
-static volatile sig_atomic_t received_from_mechanism_socket = 0;
-static volatile sig_atomic_t error_from_mechanism_signal = 0;
+static volatile sig_atomic_t mechanism_status= -1;
 
 static int
 ntfw_callback (const char * path, const struct stat * sb, int type_flag, struct FTW * ftw_buf) {
@@ -99,24 +98,15 @@ handle_sigchld (void (*handler)(void), int flags) {
 
 /**
  * Handles the SIGCHLD from the mechanism process.
- * It will first check if we have already received from the mechanism.
- * If not, then it's an error.
- * But if we have and the signal isn't a successful exit then it's also an error.
  */
 static void
 handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
   assert(signal == SIGCHLD);
 
-  if (!received_from_mechanism_socket) {
-    error_from_mechanism_signal = 1;
-  } else if (
-    signal_info->si_code != CLD_EXITED || signal_info->si_status != EXIT_SUCCESS
-  ) {
-    error_from_mechanism_signal = 0;
+  if (signal_info->si_code == CLD_EXITED) {
+    mechanism_status = signal_info->si_status;
   }
-
-  // otherwise a normal exit
 
 }
 
@@ -143,7 +133,7 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
 }
 
 static int
-launch_mechanism (char const * process_path, char const * process_arguments[]) {
+exec_mechanism (char const * process_path, char const * process_arguments[]) {
 
   // setup a pipe for between parent and forked child process
   // to communicate errors during the fork prior to the exec
@@ -224,257 +214,357 @@ launch_mechanism (char const * process_path, char const * process_arguments[]) {
 
 }
 
+static bool
+parse_args (
+  int argc,
+  char * * argv,
+  char * * argv_,
+  uint32_t * baud,
+  char * * serial_port
+) {
+
+  memcpy(argv_, argv, sizeof(char *) * argc);
+
+  static const char * const command_usage[] = {
+    "privilege-elevation [options] [--] <serial-port-path>",
+    NULL,
+  };
+
+  struct argparse_option command_options[] = {
+    OPT_HELP(),
+    OPT_INTEGER(
+      'b',
+      "baud",
+      &baud,
+      "select standard baud rate, the default is 9600"
+    ),
+    OPT_END(),
+  };
+
+  struct argparse argparse;
+  argparse_init(&argparse, command_options, command_usage, 0);
+
+  argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.");
+
+  int argc_ = argparse_parse(&argparse, argc, argv_);
+
+  if (argc_ < 1) {
+    argparse_usage(&argparse);
+    return false;
+  }
+
+  *serial_port = argv_[0];
+
+  return true;
+
+}
+
+static int
+setup_unix_sock (const char * sock_path, int backlog, bool nonblocking) {
+
+  struct sockaddr_un unix_sock_addr = {
+    .sun_family = AF_UNIX,
+    .sun_path = sock_path
+  };
+
+  int unix_sock_fd = socket(PF_UNIX, SOCK_STREAM, 0);
+  if (unix_sock_fd < 0) {
+    return -1;
+  }
+
+  if (
+    bind(
+      unix_sock_fd,
+      (struct sockaddr *) &unix_sock_addr,
+      sizeof(unix_sock_addr)
+    ) != 0
+  ) {
+    return -1;
+  }
+
+  // we only expect 1 client, so a backlog of 1 is fine
+  if (listen(unix_sock_fd, backlog) != 0) {
+    return -1;
+  }
+
+  if (nonblocking) {
+    int nonblocking_flag = fcntl(unix_sock_fd, F_GETFL, 0) | O_NONBLOCK;
+    if (fcntl(unix_sock_fd, F_SETFL, nonblocking_flag) == -1) {
+      return -1;
+    }
+  }
+
+  return unix_sock_fd;
+
+}
+
+static int
+launch_mechanism (
+  const char * mechanism_path,
+  const char * pkexec_path,
+  char * * mechanism_args,
+  int sock_fd,
+  sigset_t * signal_orig_mask,
+  bool privileged
+) {
+
+  // we need to create our own array given the input array
+  // it requires mallocing, due to dynamic ness of the array
+
+  if (privileged) {
+    // change the mechanism path
+    // and the mechanism name
+  }
+
+  int mechanism_pid = exec_mechanism(mechanism_path, mechanism_args);
+
+  if (mechanism_pid == -1) {
+    return -1;
+  }
+
+  fd_set readfds;
+  FD_ZERO(&readfds);
+  FD_SET(sock_fd, &readfds);
+
+  while (1) {
+
+    int status = pselect(1, &readfds, NULL, NULL, NULL, signal_orig_mask);
+    if (status == -1) {
+
+      if (errno != EINTR) {
+        return -1;
+      }
+
+      if (mechanism_status == EX_NOPERM) {
+        return launch_mechanism(mechanism_path, pkexec_path, sock_fd, signal_orig_mask, true);
+      } else {
+        return -1;
+      }
+
+      // if not interrupted from the mechanism, just continue
+
+    } else if (status > 0 && FD_ISSET(unix_sock_fd, &readfds)) {
+
+      break;
+
+    }
+
+  }
+
+  return mechanism_pid;
+
+}
+
 int
 main (int argc, char * * argv) {
 
-    atexit(cleanup_and_exit);
+  /* SETUP ENVIRONMENT */
 
-    static const char * const command_usage[] = {
-        "privilege-elevation [options] [--] <serial-port-path>",
-        NULL,
-    };
+  atexit(cleanup_and_exit);
 
-    unsigned int selected_baud;
+  const char * tmp_dir= getenv("TMPDIR");
+  if (!tmp_dir) tmp_dir = "/tmp";
+  const char tmp_name[] = "polkit_demo.XXXXXX";
+  const char socket_name[] = "socket.sock";
 
-    struct argparse_option command_options[] = {
-        OPT_HELP(),
-        OPT_INTEGER('b', "baud", &selected_baud, "select standard baud rate, the default is 9600"),
-        OPT_END(),
-    };
+  char pkexec_path[] = XSTR(PKEXEC_PATH);
+  char mechanism_path[] = XSTR(MECHANISM_PATH);
 
-    struct argparse argparse;
+  char pkexec_name[] = XSTR(PKEXEC_PATH);
+  basename(pkexec_name);
+  char mechanism_name[] = XSTR(MECHANISM_PATH);
+  basename(mechanism_name);
 
-    argparse_init(&argparse, command_options, command_usage, 0);
-    argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.");
+  int serial_port_fd = -1;
 
-    // make sure the original argc and argv is preserved
-    const char * * argv_ = malloc(sizeof(char *) * argc);
-    memcpy(argv_, argv, sizeof(char *) * argc);
+  uint32_t baud = 0;
+  char * serial_port;
 
-    int argc_ = argparse_parse(&argparse, argc, argv_);
+  char * * argv_ = malloc(sizeof(char *) * argc);
+  if (!parse_args(argc, argv, argv_, &baud, &serial_port)) {
+    exit(EX_USAGE);
+  }
 
-    if (argc_ < 1) {
-        argparse_usage(&argparse);
-        exit(EX_USAGE);
-    }
+  if (!baud) {
+    baud = 9600;
+  }
 
-    // this is what we want to acquire
-    int serial_port_fd;
+  assert(UNIX_PATH_MAX <= (
+    sizeof(temporary_folder) +
+    sizeof(temporary_namespace) +
+    sizeof(socket_name) + 1)
+  );
 
-    // both the selected_baud and serial_port will be passed to open-serial-device
-    const char * serial_port = argv_[0];
+  char template[sizeof(tmp_dir_size) + sizeof(tmp_name_size)];
+  snprintf(template, sizeof(template), "%s/%s", tmp_dir, tmp_name);
+  unix_sock_dir = mkdtemp(template);
 
-    // unix domain socket name
-    const char socket_name[] = "socket.sock";
+  if (!unix_sock_dir) {
+    perror("create_tmp_namespace()");.
+    exit(EX_CANTCREAT);
+  }
 
-    // default temporary folder
-    const char * temporary_folder = getenv("TMPDIR");
-    if (!temporary_folder) {
-        temporary_folder = "/tmp";
-    }
+  // the unix_sock_path = unix_sock_dir + socket_name
+  char unix_sock_path[UNIX_PATH_MAX];
+  snprintf(
+    unix_sock_path,
+    sizeof(unix_sock_path),
+    "%s/%s",
+    unix_sock_dir,
+    socket_name
+  );
 
-    // template for generating the temporary directory
-    char template[UNIX_PATH_MAX - sizeof(socket_name) + 1]; // +1 for \0 byte
-    if (snprintf(
-            template,
-            sizeof(template),
-            "%s/%s",
-            temporary_folder,
-            "polkit_demo.XXXXXX"
-        ) >= sizeof(template)
-    ) {
-        fprintf(stderr, "$TMPDIR path for saving the socket is too long.\n");
-        exit(EX_USAGE);
-    }
+  // if an asynchronous network error occurs, accept needs to fail immediately
+  // but accept is a slow system call, so it can block indefinitely
+  // to prevent this, unix_sock_fd is set to non blocking
+  // furthermore we're only expecting one client, so backlog of 1
+  unix_sock_fd = setup_unix_socket(unix_sock_path, 1, true);
+  if (unix_sock_fd == -1) {
+    perror("setup_unix_sock");
+    exit(EX_OSERR);
+  }
 
-    // creating a temporary directory
-    char * directory = mkdtemp(template);
-    if (directory == NULL) {
-        perror("mkdtemp()");.
-        exit(EX_CANTCREAT);
-    }
+  // setup the signal handler for SIGCHLD
+  // this will handle if the child process breaks
+  sigset_t signal_orig_mask;
+  if (!block_sigchld(&signal_orig_mask)) {
+    perror("block_sigchld()");
+    exit(EX_OSERR);
+  }
 
-    // copy temporary directory to static variable, so that it can be cleaned up on exit
-    strcpy(unix_sock_dir, directory);
+  // SA_SIGINFO for acquiring extra child process info
+  // SA_NOCLDSTOP because we don't care about suspension or continued signals
+  if (!handle_sigchld(handle_mechanism_process, SA_SIGINFO | SA_NOCLDSTOP)) {
+    perror("handle_sigchld()");
+    exit(EX_OSERR);
+  }
 
-    // the unix_sock_path = unix_sock_dir + socket_name
-    char unix_sock_path[UNIX_PATH_MAX];
-    snprintf(unix_sock_path, sizeof(unix_sock_path), "%s/%s", unix_sock_dir, socket_name);
+  /* UNPRIVILEGED EXECUTION CODE */
 
-    // our unix socket address
-    struct sockaddr_un unix_sock_addr = {
-        .sun_family = AF_UNIX,
-        .sun_path = unix_sock_path
-    };
+  char * mechanism_args[] = {
+    mechanism_name,
+    serial_port,
+    unix_sock_path,
+    (char *) NULL
+  };
 
-    // initialise a new socket
-    unix_sock_fd = socket(PF_UNIX, SOCK_STREAM, 0);
-    if (unix_sock_fd < 0) {
-        perror("socket()");
+  char * privileged_mechanism_args[] = {
+    pkexec_name,
+    mechanism_path,
+    serial_port,
+    unix_sock_path,
+    (char *) NULL
+  };
+
+
+
+
+
+  int mechanism_pid = launch_mechanism(mechanism_path, mechanism_args);
+
+  if (mechanism_pid == -1) {
+    perror("launch_mechanism()");
+    exit(EX_OSERR);
+  }
+
+  // now we have 2 ways of receiving information about the mechanism
+  // if the mechanism is broken, we'll receive information via SIGCHLD
+  // if the mechanism works, we'll receive information via the socket
+
+  fd_set readfds;
+  FD_ZERO(&readfds);
+  FD_SET(unix_sock_fd, &readfds);
+
+  while (1) {
+
+    int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_orig_mask);
+    if (status == -1) {
+
+      if (errno != EINTR) {
+        perror('pselect()');
         exit(EX_OSERR);
-    }
-
-    // bind the socket to the socket address
-    if (bind(unix_sock_fd, (struct sockaddr *) &unix_sock_addr, sizeof(unix_sock_addr)) != 0) {
-        perror("bind()");
-        exit(EX_OSERR);
-    }
-
-    // listen to the socket address
-    // we only expect 1 client, so a backlog of 1 is fine
-    if (listen(unix_sock_fd, 1) != 0) {
-        perror("listen()");
-        exit(EX_OSERR);
-    }
-
-    // set the listening socket to non-blocking
-    // this is required to make sure accept
-    if (fcntl(unix_sock_fd, F_SETFL, (fcntl(unix_sock_fd, F_GETFL, 0) | O_NONBLOCK)) == -1) {
-        perror("fcntl()");
-        exit(EX_OSERR);
-    }
-
-    // setup the executable paths
-    // the paths will be used for execution, while the names will be used for process names
-    // basename mutates its parameter, so we need to duplciate it
-    char pkexec_path[] = XSTR(PKEXEC_PATH);
-    char pkexec_name[] = XSTR(PKEXEC_PATH);
-    pkexec_name = basename(pkexec_name);
-    char mechanism_path[] = XSTR(MECHANISM_PATH);
-    char mechanism_name[] = XSTR(MECHANISM_PATH);
-    mechanism_name = basename(mechanism_name);
-
-    // setup the signal handler for SIGCHLD
-    // this will handle if the child process breaks
-
-    sigset_t signal_orig_mask;
-    if (!block_sigchld(&signal_orig_mask)) {
-      perror("block_sigchld()");
-      exit(EX_OSERR);
-    }
-
-    // SA_SIGINFO for acquiring extra child process info
-    // SA_NOCLDSTOP because we don't care about suspension or continued signals
-    if (!handle_sigchld(handle_mechanism_process, SA_SIGINFO | SA_NOCLDSTOP)) {
-      perror("handle_sigchld()");
-      exit(EX_OSERR);
-    }
-
-    // attempt unprivileged open-serial-device
-    char * mechanism_args[] = {
-      mechanism_name,
-      serial_port,
-      unix_sock_path,
-      (char *) NULL
-    };
-
-    int mechanism_pid = launch_mechanism(mechanism_path, mechanism_args);
-
-    if (mechanism_pid == -1) {
-      perror("launch_mechanism()");
-      exit(EX_OSERR);
-    }
-
-    // now we have 2 ways of receiving information about the mechanism
-    // if the mechanism is broken, we'll receive information via SIGCHLD
-    // if the mechanism works, we'll receive information via the socket
-
-    fd_set readfds;
-    FD_ZERO(&readfds);
-    FD_SET(unix_sock_fd, &readfds);
-
-    while (1) {
-
-      // if 0, then it has timed out but that's not possible here
-      int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_orig_mask);
-
-      if (status == -1) {
-
-        // error or interrupt occurred
-        if (errno != EINTR) {
-          perror('pselect()');
-          exit(EX_OSERR);
-        }
-
-        // if we were not interrupted from the mechanism just continue
-        if (error_from_mechanism_signal) {
-          perror('handle_mechanism_process()');
-          exit(EX_UNAVAILABLE);
-        }
-
-      } else if (status > 0 && FD_ISSET(unix_sock_fd, &readfds)) {
-
-        break;
-
       }
 
-    }
+      if (mechanism_status == EX_NOPERM) {
+        // restart!
 
-    // permanently unmask the SIGCHLD, allowing it to interrupt us
-    if (!unblock_sigchld(&signal_orig_mask)) {
-      perror("unblock_sigchld()");
-      exit(EX_OSERR);
-    }
-
-    // this is not used, we can just pass NULL into both
-    // but.. we may just log it out to see what's what
-    struct sockaddr_un unix_peer_addr = {0};
-    socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
-
-    // if an asynchronous network error occurs, accept needs to fail immediately
-    // but accept is a slow system call, so it can block indefinitely
-    // to prevent this, unix_sock_fd is set to non blocking
-    unix_peer_fd = accept(
-                          unix_sock_fd,
-                          (struct sockaddr *) &unix_peer_addr,
-                          &unix_peer_addr_size
-                          );
-
-    // accept only runs once and doesn't block because unix_sock_fd is non blocking
-    // if we can't accept a connection we just exit
-    if (unix_peer_fd == -1) {
-
-      if (errno == EAGAIN || errno == EWOULDBLOCK) {
-        perror("accept()");
-        exit(EX_UNAVAILABLE);
-      } else if (errno == EINTR && error_from_mechanism_signal) {
+      } else {
         perror('handle_mechanism_process()');
         exit(EX_UNAVAILABLE);
-      } else {
-        perror('accept()');
-        exit(EX_OSERR);
       }
+
+      // if not interrupted from the mechanism, just continue
+
+    } else if (status > 0 && FD_ISSET(unix_sock_fd, &readfds)) {
+
+      break;
 
     }
 
-    if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
-      perror("check_peer_pid()");
-      exit(EX_PROTOCOL);
+  }
+
+  // if this is reached, there is a pending file descriptor
+  // we can restart if the process failed
+
+  // permanently unmask the SIGCHLD, allowing it to interrupt us
+  if (!unblock_sigchld(&signal_orig_mask)) {
+    perror("unblock_sigchld()");
+    exit(EX_OSERR);
+  }
+
+  struct sockaddr_un unix_peer_addr = {0};
+  socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
+
+  unix_peer_fd = accept(
+    unix_sock_fd,
+    (struct sockaddr *) &unix_peer_addr,
+    &unix_peer_addr_size
+  );
+
+  if (unix_peer_fd == -1) {
+
+    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+      perror("accept()");
+      exit(EX_UNAVAILABLE);
+    } else if (errno == EINTR && error_from_mechanism_signal) {
+      perror('handle_mechanism_process()');
+      exit(EX_UNAVAILABLE);
+    } else {
+      perror('accept()');
+      exit(EX_OSERR);
     }
 
-    shutdown(unix_peer_fd, SHUT_WR);
+  }
 
-    // the accepted connection is not non-blocking
+  if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
+    perror("check_peer_pid()");
+    exit(EX_PROTOCOL);
+  }
 
-    char message_buffer[sizeof(MechanismProto)] = {0};
+  shutdown(unix_peer_fd, SHUT_WR);
 
-    // this will store the actual message
-    struct iovec io_vector[1] = {
-      {
-        .iov_base = message_buffer,
-        .iov_len = sizeof(message_buffer)
-      }
-    };
+  /* UNPRIVILEGED RECEIVE CODE */
 
-    // buffer for the ancillary data (the file descriptor)
-    char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
+  // the accepted connection is not non-blocking
 
-    // a msghdr is really just the socket options, options for the sendmsg and recvmsg
-    struct msghdr message_options = {0};
-    message_options.msg_iov = io_vector;
-    message_options.msg_iovlength = sizeof(io_vector);
-    message_options.msg_control = ancillary_buffer;
-    message_options.msg_controllen = sizeof(ancillary_buffer);
+  char message_buffer[sizeof(MechanismProto)] = {0};
+
+  struct iovec io_vector[1] = {
+    {
+      .iov_base = message_buffer,
+      .iov_len = sizeof(message_buffer)
+    }
+  };
+
+  // buffer for the ancillary data (the file descriptor)
+  char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
+
+  // msghdr is the socket options for sendmsg and recvmsg
+  struct msghdr message_options = {0};
+  message_options.msg_iov = io_vector;
+  message_options.msg_iovlength = sizeof(io_vector);
+  message_options.msg_control = ancillary_buffer;
+  message_options.msg_controllen = sizeof(ancillary_buffer);
 
     // we will spin on receiving data from the mechanism, but sleep 1
     // also we shall set that the received file descriptor needs to be closed

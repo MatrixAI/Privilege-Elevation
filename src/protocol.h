@@ -1,7 +1,6 @@
 #pragma once
 
 typedef enum {
-  PERMERR = 0,
   PRIVFD = 1
 } MechanismProtoType;
 
