@@ -1,5 +1,10 @@
 #pragma once
 
+typedef enum {
+  PERMERR = 0,
+  PRIVFD = 1
+} MechanismProtoType;
+
 typedef struct MechanismProto {
-  enum {PERMERR, PRIVFD} type;
+  uint8_t type;
 } MechanismProto;
