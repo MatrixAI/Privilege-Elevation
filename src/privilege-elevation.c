@@ -138,7 +138,7 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
 }
 
 static int
-launch_mechanism (char const * process_path, char const * process_arguments[]) {
+exec_mechanism (char const * process_path, char const * process_arguments[]) {
 
   // setup a pipe for between parent and forked child process
   // to communicate errors during the fork prior to the exec
@@ -344,23 +344,40 @@ wait_for_read (
 
 }
 
-static int launch_mechanism_priv (mechanism_path, mechanism_args, sock_fd, signal_mask, mechanism_pid) {
+static bool
+launch_mechanism (
+  const char * mechanism_path,
+  const char * * mechanism_args,
+  const char * pkexec_path,
+  const char * * pkexec_args,
+  int sock_fd,
+  sigset_t * signal_mask,
+  int * mechanism_pid,
+  bool privileged
+) {
 
-  int pid = launch_mechanism(mechanism_path, mechanism_args);
+  int pid;
+  if (!privileged) {
+    pid = exec_mechanism(mechanism_path, mechanism_args);
+  } else {
+    pid = exec_mechanism(pkexec_path, pkexec_args);
+  }
+
   if (pid == -1) {
-    return -3;
+    return false;
   }
 
   int status = wait_for_read(sock_fd, signal_mask);
 
-  if (status == -1) {
-    mechanism_args_priv = ...;
-    return launch_mechanism_priv(pkexec_path, mechanism_args_priv, sock_fd, signal_mask, mechanism_pid);
+  switch (status) {
+  case 1:
+    *mechanism_pid = pid;
+    return true;
+  case -1:
+    return launch_mechanism(mechanism_path, mechanism_args, pkexec_path, pkexec_args, sock_fd, signal_mask, mechanism_pid, true);
+  default:
+    return false;
   }
-
-  *mechanism_pid = pid;
-
-  return status;
 
 }
 
@@ -457,7 +474,7 @@ main (int argc, char * * argv) {
     (char *) NULL
   };
 
-  char * mechanism_args_priv[] = {
+  char * pkexec_args[] = {
     pkexec_name,
     mechanism_path,
     serial_port,
@@ -467,52 +484,18 @@ main (int argc, char * * argv) {
 
   int mechanism_pid;
 
-  mechanism_pid = launch_mechanism(mechanism_path, mechanism_args);
-  if (mechanism_pid == -1) {
+  if (!launch_mechanism(
+    mechanism_path,
+    mechanism_args,
+    pkexec_path,
+    pkexec_args,
+    unix_sock_fd,
+    signal_orig_mask,
+    &mechanism_pid,
+    false
+  )) {
     perror("launch_mechanism()");
-    exit(EX_OSERR);
-  }
-
-  int status = wait_for_read(unix_sock_fd, signal_orig_mask);
-
-  switch (status) {
-  case 0:
-    perror("wait_for_read()");
-    exit(EX_OSERR);
-  case -1:
-
-    mechanism_pid = launch_mechanism(pkexec_path, mechanism_args_priv);
-    if (mechanism_pid == -1) {
-      perror("launch_mechanism_priv()");
-      exit(EX_OSERR);
-    }
-
-    int status = wait_for_read(unix_sock_fd, signal_orig_mask);
-
-    switch (status) {
-    case 0:
-      perror("wait_for_read()");
-      exit(EX_OSERR);
-    case -1:
-      perror("wait_for_read()");
-      exit(EX_NOPERM);
-    case -2:
-      perror("wait_for_read()");
-      exit(EX_UNAVAILABLE);
-    }
-
-  case -2:
-    perror("wait_for_read()");
     exit(EX_UNAVAILABLE);
-  }
-
-  // got a pending connection
-  // there's no restart logic here anymore!
-
-  // permanently unmask the SIGCHLD, allowing it to interrupt us
-  if (!unblock_sigchld(&signal_orig_mask)) {
-    perror("unblock_sigchld()");
-    exit(EX_OSERR);
   }
 
   struct sockaddr_un unix_peer_addr = {0};
@@ -525,18 +508,8 @@ main (int argc, char * * argv) {
   );
 
   if (unix_peer_fd == -1) {
-
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      perror("accept()");
-      exit(EX_UNAVAILABLE);
-    } else if (errno == EINTR && error_from_mechanism_signal) {
-      perror('handle_mechanism_process()');
-      exit(EX_UNAVAILABLE);
-    } else {
-      perror('accept()');
-      exit(EX_OSERR);
-    }
-
+    perror('accept()');
+    exit(EX_OSERR);
   }
 
   if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
@@ -546,7 +519,7 @@ main (int argc, char * * argv) {
 
   shutdown(unix_peer_fd, SHUT_WR);
 
-  /* UNPRIVILEGED RECEIVE CODE */
+  /* RECEIVE CODE */
 
   // the accepted connection is not non-blocking
 
@@ -569,102 +542,62 @@ main (int argc, char * * argv) {
   message_options.msg_control = ancillary_buffer;
   message_options.msg_controllen = sizeof(ancillary_buffer);
 
-    // we will spin on receiving data from the mechanism, but sleep 1
-    // also we shall set that the received file descriptor needs to be closed
-    // if the main process execs (this is for security reasons)
-    do {
+  fd_set readfds;
+  FD_ZERO(&readfds);
+  FD_SET(unix_peer_fd, &readfds);
 
-      ssize_t read_size = recvmsg(unix_peer_fd, &message_options, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
+  int status = pselect(1, &readfds, NULL, NULL, NULL, signal_orig_mask);
+  if (status == -1) {
+    perror("pselect()");
+    exit(EX_OSERR);
+  }
 
-      if (read_size <= 0 && error_from_mechanism_signal) {
-        perror('handle_mechanism_process()');
-        exit(EX_UNAVAILABLE);
-      } else if (read_size < -1) {
-        perror("recvmsg()");
-        exit(EX_OSERR);
-      }
+  // permanently unmask the SIGCHLD, allowing it to interrupt us
+  if (!unblock_sigchld(&signal_orig_mask)) {
+    perror("unblock_sigchld()");
+    exit(EX_OSERR);
+  }
 
-      sleep(1);
+  ssize_t read_size = recvmsg(unix_peer_fd, &message_options, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
 
-    } while (read_size < 1);
+  if (read_size < 1) {
+    perror("recvmsg()");
+    exit(EX_UNAVAILABLE);
+  }
 
-    // our protocol is just 1 byte
-    // however if it were bigger, we would need to collect up the bytes into a larger message frame
-    // it would work like this, used a linked list of reads
-    // reads can be of arbitrary size, but here we'll limit it to size of 1 or more
-    // then after each read, you drive the parser
-    // the parser maintains a pointer to the head of the linked list, while also a pointer within a head
-    // as it parses a single message, it would deallocate n-heads of the linked list, but not within a head (it will just use the offset)
-    // once it has 1 atomic message (a parse result), it can yield that result, and call something else
-    // in fact it's a composition, we can have a parser for a single atomic message, and then a higher level context free parser that parses a sequence of atomic messages to form an expression
-    // in this case of a struct, we have 2 levels, one for parsing a single atomic struct field, but the higher level understands the entire struct
-    // this in essence unpacks the buffer into a struct
-    // a struct has padding and endianness, whereas the network protocol itself is packed and has a defined endianness as well
+  MechanismProto message = (MechanismProto) (message_buffer[0]);
 
-    MechanismProto message = (MechanismProto) (message_buffer[0]);
+  if (message.type != PRIVFD) {
+    perror("Unexpected message from mechanism");
+    exit(EX_SOFTWARE);
+  }
 
-    if (message.type == PERMERR) {
+  if ((message_options.msg_flags & MSG_CTRUNC) == MSG_CTRUNC) {
+    fprintf(stderr, "Not enough space provided for ancillary element array");
+    exit(EX_SOFTWARE);
+  }
 
-      // we need to restart with privileged access
-      // using polkit to launch mechanism
-      // we need to abstract all of this into a recursive function that retries
-      // this means launching a mechanism again, with the same socket
-      // accepting a connection
-      // reading from the connection
-
-      // how to rearchitect this?
-      // it needs to be like a retry monad
-      // a function that recalls itself once when it fails
-
-    } else if (message.type == PRIVFD) {
-
-      // we have the file descriptor, let's get it
-      if ((message_options.msg_flags & MSG_CTRUNC) == MSG_CTRUNC) {
-        fprintf(stderr, "Not enough space provided for ancillary element array");
-        exit(EX_SOFTWARE);
-      }
-
-      // don't we only expect 1 message
-      // why would we iterate over control messages?
-
-      // it's possible that the sender may send multiple control messsages for a single data
-
-      for (struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
-           control_message != NULL;
-           control_message = CMSG_NXTHDR(&message_options, control_message))
-        {
-          if (
-              (control_message->cmsg_level == SOL_SOCKET)
-              &&
-              control_message->cmsg_type == SCM_RIGHTS
-              )
-            {
-              serial_port_fd = *((int *) CMSG_DATA(control_message));
-              break;
-            }
-        }
-
-      if (serial_port_fd < 0) {
-        fprintf(stderr, "Did not get a file descriptor from the mechanism");
-        exit(EX_SOFTWARE);
-      }
-
-      received_from_mechanism_socket = 1;
-
-      // is this necessary?
-      shutdown(unix_peer_fd, SHUT_RDWR);
-      close(unix_peer_fd);
-
-      shutdown(unix_sock_fd, SHUT_RDWR);
-      close(unix_sock_fd);
-
-      // try out the serial_port_fd
-      // read from it, and write to it!
-      // whatever!!
-
+  // the sender may send multiple control messsages for a single message
+  for (
+    struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
+    control_message != NULL;
+    control_message = CMSG_NXTHDR(&message_options, control_message)
+  ) {
+    if (
+      (control_message->cmsg_level == SOL_SOCKET) &&
+      (control_message->cmsg_type == SCM_RIGHTS)
+    ) {
+      serial_port_fd = *((int *) CMSG_DATA(control_message));
+      break;
     }
+  }
 
-    //http://www.techdeviancy.com/uds.html
+  if (serial_port_fd < 0) {
+    fprintf(stderr, "Did not get a file descriptor from the mechanism");
+    exit(EX_SOFTWARE);
+  }
 
+  shutdown(unix_peer_fd, SHUT_RDWR);
+  close(unix_peer_fd);
 
 }
