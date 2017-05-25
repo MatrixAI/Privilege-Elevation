@@ -104,6 +104,11 @@ handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
   assert(signal == SIGCHLD);
 
+  // this can also be called as part of pkexec
+  // that would be the mechanism as well
+  // in such a case we can handle its specific errors as well
+  // 127 no pkexec perm and 126 user cancelled
+
   if (signal_info->si_code == CLD_EXITED) {
     mechanism_status = signal_info->si_status;
   }
@@ -133,7 +138,7 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
 }
 
 static int
-exec_mechanism (char const * process_path, char const * process_arguments[]) {
+launch_mechanism (char const * process_path, char const * process_arguments[]) {
 
   // setup a pipe for between parent and forked child process
   // to communicate errors during the fork prior to the exec
@@ -299,28 +304,10 @@ setup_unix_sock (const char * sock_path, int backlog, bool nonblocking) {
 }
 
 static int
-launch_mechanism (
-  const char * mechanism_path,
-  const char * pkexec_path,
-  char * * mechanism_args,
+wait_for_read (
   int sock_fd,
-  sigset_t * signal_orig_mask,
-  bool privileged
+  sigset_t * signal_mask
 ) {
-
-  // we need to create our own array given the input array
-  // it requires mallocing, due to dynamic ness of the array
-
-  if (privileged) {
-    // change the mechanism path
-    // and the mechanism name
-  }
-
-  int mechanism_pid = exec_mechanism(mechanism_path, mechanism_args);
-
-  if (mechanism_pid == -1) {
-    return -1;
-  }
 
   fd_set readfds;
   FD_ZERO(&readfds);
@@ -328,17 +315,19 @@ launch_mechanism (
 
   while (1) {
 
-    int status = pselect(1, &readfds, NULL, NULL, NULL, signal_orig_mask);
+    int status = pselect(1, &readfds, NULL, NULL, NULL, signal_mask);
     if (status == -1) {
 
       if (errno != EINTR) {
-        return -1;
+        return 0;
       }
 
-      if (mechanism_status == EX_NOPERM) {
-        return launch_mechanism(mechanism_path, pkexec_path, sock_fd, signal_orig_mask, true);
-      } else {
-        return -1;
+      if (mechanism_status != -1) {
+        if (mechanism_status == EX_NOPERM) {
+          return -1;
+        } else {
+          return -2;
+        }
       }
 
       // if not interrupted from the mechanism, just continue
@@ -351,7 +340,27 @@ launch_mechanism (
 
   }
 
-  return mechanism_pid;
+  return 1;
+
+}
+
+static int launch_mechanism_priv (mechanism_path, mechanism_args, sock_fd, signal_mask, mechanism_pid) {
+
+  int pid = launch_mechanism(mechanism_path, mechanism_args);
+  if (pid == -1) {
+    return -3;
+  }
+
+  int status = wait_for_read(sock_fd, signal_mask);
+
+  if (status == -1) {
+    mechanism_args_priv = ...;
+    return launch_mechanism_priv(pkexec_path, mechanism_args_priv, sock_fd, signal_mask, mechanism_pid);
+  }
+
+  *mechanism_pid = pid;
+
+  return status;
 
 }
 
@@ -439,7 +448,7 @@ main (int argc, char * * argv) {
     exit(EX_OSERR);
   }
 
-  /* UNPRIVILEGED EXECUTION CODE */
+  /* EXECUTION CODE */
 
   char * mechanism_args[] = {
     mechanism_name,
@@ -448,7 +457,7 @@ main (int argc, char * * argv) {
     (char *) NULL
   };
 
-  char * privileged_mechanism_args[] = {
+  char * mechanism_args_priv[] = {
     pkexec_name,
     mechanism_path,
     serial_port,
@@ -456,55 +465,49 @@ main (int argc, char * * argv) {
     (char *) NULL
   };
 
+  int mechanism_pid;
 
-
-
-
-  int mechanism_pid = launch_mechanism(mechanism_path, mechanism_args);
-
+  mechanism_pid = launch_mechanism(mechanism_path, mechanism_args);
   if (mechanism_pid == -1) {
     perror("launch_mechanism()");
     exit(EX_OSERR);
   }
 
-  // now we have 2 ways of receiving information about the mechanism
-  // if the mechanism is broken, we'll receive information via SIGCHLD
-  // if the mechanism works, we'll receive information via the socket
+  int status = wait_for_read(unix_sock_fd, signal_orig_mask);
 
-  fd_set readfds;
-  FD_ZERO(&readfds);
-  FD_SET(unix_sock_fd, &readfds);
+  switch (status) {
+  case 0:
+    perror("wait_for_read()");
+    exit(EX_OSERR);
+  case -1:
 
-  while (1) {
-
-    int status = pselect(1, &readfds, NULL, NULL, NULL, &signal_orig_mask);
-    if (status == -1) {
-
-      if (errno != EINTR) {
-        perror('pselect()');
-        exit(EX_OSERR);
-      }
-
-      if (mechanism_status == EX_NOPERM) {
-        // restart!
-
-      } else {
-        perror('handle_mechanism_process()');
-        exit(EX_UNAVAILABLE);
-      }
-
-      // if not interrupted from the mechanism, just continue
-
-    } else if (status > 0 && FD_ISSET(unix_sock_fd, &readfds)) {
-
-      break;
-
+    mechanism_pid = launch_mechanism(pkexec_path, mechanism_args_priv);
+    if (mechanism_pid == -1) {
+      perror("launch_mechanism_priv()");
+      exit(EX_OSERR);
     }
 
+    int status = wait_for_read(unix_sock_fd, signal_orig_mask);
+
+    switch (status) {
+    case 0:
+      perror("wait_for_read()");
+      exit(EX_OSERR);
+    case -1:
+      perror("wait_for_read()");
+      exit(EX_NOPERM);
+    case -2:
+      perror("wait_for_read()");
+      exit(EX_UNAVAILABLE);
+    }
+
+  case -2:
+    perror("wait_for_read()");
+    exit(EX_UNAVAILABLE);
   }
 
-  // if this is reached, there is a pending file descriptor
-  // we can restart if the process failed
+  // got a pending connection
+  // there's no restart logic here anymore!
 
   // permanently unmask the SIGCHLD, allowing it to interrupt us
   if (!unblock_sigchld(&signal_orig_mask)) {
