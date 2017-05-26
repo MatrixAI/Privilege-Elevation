@@ -1,3 +1,7 @@
+#define _GNU_SOURCE
+#define _XOPEN_SOURCE 500
+
+#include <ftw.h>        // nftw()
 #include <stdlib.h>     // EXIT_FAILURE, exit(), mkdtemp(), getenv(), atexit()
 #include <stdio.h>      // printf(), snprintf(), remove()
 #include <stddef.h>     // NULL
@@ -6,12 +10,11 @@
 #include <unistd.h>     // read(), write(), fork(), exec(), getpid(), getppid()
 #include <errno.h>      // perror()
 #include <sysexits.h>   // EX_USAGE, EX_CANTCREAT, EX_UNAVAILABLE
-#include <ftw.h>        // nftw()
 #include <libgen.h>     // basename()
 #include <assert.h>     // assert()
 #include <fcntl.h>      // fcntl()
 #include <sys/socket.h> // PF_UNIX, SOCK_STREAM, CMSG_SPACE, socklen_t, struct ucred, struct msghdr, socket(), bind(), listen(), accept(), getsockopt
-#include <sys/un.h>     // UNIX_PATH_MAX, struct sockaddr_un
+#include <linux/un.h>   // UNIX_PATH_MAX, struct sockaddr_un
 #include <sys/types.h>  // pid_t
 #include <sys/wait.h>   // waitpid()
 #include <sys/select.h> // pselect()
@@ -28,15 +31,22 @@
     #error "PKEXEC_PATH and MECHANISM_PATH must be defined."
 #endif
 
-static char unix_sock_dir[UNIX_PATH_MAX] = {0};
+/* static char unix_sock_dir[UNIX_PATH_MAX] = {0}; */
 
-static int unix_sock_fd = 0;
-static int unix_peer_fd = 0;
+static char * unix_sock_dir;
+
+static int unix_sock_fd = -1;
+static int unix_peer_fd = -1;
 
 static volatile sig_atomic_t mechanism_status= -1;
 
 static int
-ntfw_callback (const char * path, const struct stat * sb, int type_flag, struct FTW * ftw_buf) {
+ntfw_callback (
+  const char * path,
+  const struct stat * sb,
+  int type_flag,
+  struct FTW * ftw_buf
+) {
 
     int status = remove(path);
 
@@ -78,7 +88,7 @@ block_sigchld (sigset_t * signal_orig_mask) {
 static int
 unblock_sigchld (sigset_t * signal_orig_mask) {
 
-  return (sigprocmask(SIG_SET, signal_orig_mask, NULL) == 0);
+  return (sigprocmask(SIG_SETMASK, signal_orig_mask, NULL) == 0);
 
 }
 
@@ -87,7 +97,7 @@ unblock_sigchld (sigset_t * signal_orig_mask) {
  * This should run after SIGCHLD is first blocked.
  */
 static int
-handle_sigchld (void (*handler)(void), int flags) {
+handle_sigchld (void (*handler)(int, siginfo_t *, void *), int flags) {
 
   struct sigaction signal_action = {0};
   signal_action.sa_flags = flags;
@@ -115,10 +125,10 @@ handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
 }
 
-static int
+static bool
 check_peer_pid (int peer_sock_fd, int peer_pid) {
 
-  struct ucred peer_credentials = {0};
+  struct ucred peer_credentials;
   int peer_credentials_size = sizeof(peer_credentials);
   if (
       getsockopt(
@@ -130,7 +140,7 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
                  )
       != 0
   ) {
-    return 0;
+    return false;
   }
 
   return (peer_credentials.pid == peer_pid);
@@ -138,7 +148,7 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
 }
 
 static int
-exec_mechanism (char const * process_path, char const * process_arguments[]) {
+exec_mechanism (const char * process_path, const char * const process_arguments[]) {
 
   // setup a pipe for between parent and forked child process
   // to communicate errors during the fork prior to the exec
@@ -163,7 +173,7 @@ exec_mechanism (char const * process_path, char const * process_arguments[]) {
     if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) {
       // if the parent had died, this would result in a SIGPIPE
       // which close the parent process as well
-      write(exec_pipe[1], &errno, sizeof(errno));
+      if (write(exec_pipe[1], &errno, sizeof(errno)));
       exit(EX_OSERR);
     }
 
@@ -177,7 +187,7 @@ exec_mechanism (char const * process_path, char const * process_arguments[]) {
     // this doesn't guarantee that the mechanism process succeeds
     // only that the fork + exec worked
     if ((fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC)) == -1) {
-      write(exec_pipe[1], &errno, sizeof(errno));
+      if (write(exec_pipe[1], &errno, sizeof(errno)));
       exit(EX_OSERR);
     }
 
@@ -185,10 +195,11 @@ exec_mechanism (char const * process_path, char const * process_arguments[]) {
     // the child process can access file descriptors in the parent
     // however we need to pass file descriptors from the child to the parent
     // so we'll be using unix domain sockets for communication
-    execv(process_path, process_arguments);
+    execv(process_path, (char * const *) process_arguments);
 
     // exec failed, we must write the errno into the pipe
-    write(exec_pipe[1], &errno, sizeof(errno));
+    if (write(exec_pipe[1], &errno, sizeof(errno)));
+
     // exit the child process
     exit(EX_UNAVAILABLE);
 
@@ -222,10 +233,10 @@ exec_mechanism (char const * process_path, char const * process_arguments[]) {
 static bool
 parse_args (
   int argc,
-  char * * argv,
+  const char * const * argv,
   char * * argv_,
   uint32_t * baud,
-  char * * serial_port
+  const char * * serial_port
 ) {
 
   memcpy(argv_, argv, sizeof(char *) * argc);
@@ -249,9 +260,9 @@ parse_args (
   struct argparse argparse;
   argparse_init(&argparse, command_options, command_usage, 0);
 
-  argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.");
+  argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.", "");
 
-  int argc_ = argparse_parse(&argparse, argc, argv_);
+  int argc_ = argparse_parse(&argparse, argc, (const char * *) argv_);
 
   if (argc_ < 1) {
     argparse_usage(&argparse);
@@ -267,10 +278,9 @@ parse_args (
 static int
 setup_unix_sock (const char * sock_path, int backlog, bool nonblocking) {
 
-  struct sockaddr_un unix_sock_addr = {
-    .sun_family = AF_UNIX,
-    .sun_path = sock_path
-  };
+  struct sockaddr_un unix_sock_addr;
+  unix_sock_addr.sun_family = AF_UNIX;
+  strcpy(unix_sock_addr.sun_path, sock_path);
 
   int unix_sock_fd = socket(PF_UNIX, SOCK_STREAM, 0);
   if (unix_sock_fd < 0) {
@@ -347,9 +357,9 @@ wait_for_read (
 static bool
 launch_mechanism (
   const char * mechanism_path,
-  const char * * mechanism_args,
+  const char * const * mechanism_args,
   const char * pkexec_path,
-  const char * * pkexec_args,
+  const char * const * pkexec_args,
   int sock_fd,
   sigset_t * signal_mask,
   int * mechanism_pid,
@@ -382,12 +392,18 @@ launch_mechanism (
 }
 
 int
-main (int argc, char * * argv) {
+main (int argc, const char * const * argv) {
 
   /* SETUP ENVIRONMENT */
 
   atexit(cleanup_and_exit);
 
+  // temporary variables
+  int status;
+  size_t size;
+  ssize_t ssize;
+
+  // permanent variables
   const char * tmp_dir= getenv("TMPDIR");
   if (!tmp_dir) tmp_dir = "/tmp";
   const char tmp_name[] = "polkit_demo.XXXXXX";
@@ -404,7 +420,7 @@ main (int argc, char * * argv) {
   int serial_port_fd = -1;
 
   uint32_t baud = 0;
-  char * serial_port;
+  const char * serial_port;
 
   char * * argv_ = malloc(sizeof(char *) * argc);
   if (!parse_args(argc, argv, argv_, &baud, &serial_port)) {
@@ -415,18 +431,20 @@ main (int argc, char * * argv) {
     baud = 9600;
   }
 
-  assert(UNIX_PATH_MAX <= (
-    sizeof(temporary_folder) +
-    sizeof(temporary_namespace) +
-    sizeof(socket_name) + 1)
+  assert(UNIX_PATH_MAX <=
+    (
+      strlen(tmp_dir) +
+      sizeof(tmp_name) +
+      sizeof(socket_name) + 1
+    )
   );
 
-  char template[sizeof(tmp_dir_size) + sizeof(tmp_name_size)];
+  char template[strlen(tmp_dir) + sizeof(tmp_name)];
   snprintf(template, sizeof(template), "%s/%s", tmp_dir, tmp_name);
   unix_sock_dir = mkdtemp(template);
 
   if (!unix_sock_dir) {
-    perror("create_tmp_namespace()");.
+    perror("create_tmp_namespace()");
     exit(EX_CANTCREAT);
   }
 
@@ -444,7 +462,7 @@ main (int argc, char * * argv) {
   // but accept is a slow system call, so it can block indefinitely
   // to prevent this, unix_sock_fd is set to non blocking
   // furthermore we're only expecting one client, so backlog of 1
-  unix_sock_fd = setup_unix_socket(unix_sock_path, 1, true);
+  unix_sock_fd = setup_unix_sock(unix_sock_path, 1, true);
   if (unix_sock_fd == -1) {
     perror("setup_unix_sock");
     exit(EX_OSERR);
@@ -467,14 +485,14 @@ main (int argc, char * * argv) {
 
   /* EXECUTION CODE */
 
-  char * mechanism_args[] = {
+  const char * const mechanism_args[] = {
     mechanism_name,
     serial_port,
     unix_sock_path,
     (char *) NULL
   };
 
-  char * pkexec_args[] = {
+  const char const * pkexec_args[] = {
     pkexec_name,
     mechanism_path,
     serial_port,
@@ -490,7 +508,7 @@ main (int argc, char * * argv) {
     pkexec_path,
     pkexec_args,
     unix_sock_fd,
-    signal_orig_mask,
+    &signal_orig_mask,
     &mechanism_pid,
     false
   )) {
@@ -508,12 +526,12 @@ main (int argc, char * * argv) {
   );
 
   if (unix_peer_fd == -1) {
-    perror('accept()');
+    perror("accept()");
     exit(EX_OSERR);
   }
 
   if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
-    perror("check_peer_pid()");
+    fprintf(stderr, "%s\n", "Unknown peer pid");
     exit(EX_PROTOCOL);
   }
 
@@ -523,8 +541,10 @@ main (int argc, char * * argv) {
 
   // the accepted connection is not non-blocking
 
+  // the buffer for our message
   char message_buffer[sizeof(MechanismProto)] = {0};
 
+  // gather vector
   struct iovec io_vector[1] = {
     {
       .iov_base = message_buffer,
@@ -535,69 +555,72 @@ main (int argc, char * * argv) {
   // buffer for the ancillary data (the file descriptor)
   char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
 
-  // msghdr is the socket options for sendmsg and recvmsg
+  // msghdr is the socket options
   struct msghdr message_options = {0};
   message_options.msg_iov = io_vector;
-  message_options.msg_iovlength = sizeof(io_vector);
+  message_options.msg_iovlen = sizeof(io_vector);
   message_options.msg_control = ancillary_buffer;
   message_options.msg_controllen = sizeof(ancillary_buffer);
 
-  fd_set readfds;
-  FD_ZERO(&readfds);
-  FD_SET(unix_peer_fd, &readfds);
-
-  int status = pselect(1, &readfds, NULL, NULL, NULL, signal_orig_mask);
-  if (status == -1) {
-    perror("pselect()");
-    exit(EX_OSERR);
-  }
-
-  // permanently unmask the SIGCHLD, allowing it to interrupt us
   if (!unblock_sigchld(&signal_orig_mask)) {
     perror("unblock_sigchld()");
     exit(EX_OSERR);
   }
 
-  ssize_t read_size = recvmsg(unix_peer_fd, &message_options, MSG_CMSG_CLOEXEC | MSG_DONTWAIT);
+  ssize = recvmsg(unix_peer_fd, &message_options, 0);
 
-  if (read_size < 1) {
-    perror("recvmsg()");
-    exit(EX_UNAVAILABLE);
-  }
-
-  MechanismProto message = (MechanismProto) (message_buffer[0]);
-
-  if (message.type != PRIVFD) {
-    perror("Unexpected message from mechanism");
-    exit(EX_SOFTWARE);
+  if (ssize == -1) {
+    if (errno == EINTR && mechanism_status != -1) {
+      perror("handle_sigchld");
+      exit(EX_UNAVAILABLE);
+    } else {
+      perror("recvmsg()");
+      exit(EX_OSERR);
+    }
+  } else if (ssize == 0) {
+    fprintf(stderr, "%s\n", "Received nothing from mechanism");
+    exit(EX_PROTOCOL);
   }
 
   if ((message_options.msg_flags & MSG_CTRUNC) == MSG_CTRUNC) {
-    fprintf(stderr, "Not enough space provided for ancillary element array");
+    fprintf(stderr, "%s\n", "Not enough space provided for ancillary data");
     exit(EX_SOFTWARE);
   }
 
-  // the sender may send multiple control messsages for a single message
-  for (
-    struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
-    control_message != NULL;
-    control_message = CMSG_NXTHDR(&message_options, control_message)
+  MechanismProto message;
+  message.type = message_buffer[0];
+
+  if (message.type != PRIVFD) {
+    fprintf(stderr, "%s\n", "Unexpected message from mechanism");
+    exit(EX_PROTOCOL);
+  }
+
+  struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
+
+  if (
+    control_message->cmsg_level == SOL_SOCKET &&
+    control_message->cmsg_type == SCM_RIGHTS
   ) {
-    if (
-      (control_message->cmsg_level == SOL_SOCKET) &&
-      (control_message->cmsg_type == SCM_RIGHTS)
-    ) {
-      serial_port_fd = *((int *) CMSG_DATA(control_message));
-      break;
-    }
+    serial_port_fd = *((int *) CMSG_DATA(control_message));
+  } else {
+    fprintf(stderr, "%s\n", "Unknown ancillary data from mechanism");
   }
 
   if (serial_port_fd < 0) {
     fprintf(stderr, "Did not get a file descriptor from the mechanism");
-    exit(EX_SOFTWARE);
+    exit(EX_PROTOCOL);
   }
 
   shutdown(unix_peer_fd, SHUT_RDWR);
   close(unix_peer_fd);
+
+  /* USE THE SERIAL PORT CODE */
+
+  ssize = write(serial_port_fd, "Hello World", 11);
+  if (ssize != 11) {
+    exit(EX_IOERR);
+  }
+
+  exit(EXIT_SUCCESS);
 
 }

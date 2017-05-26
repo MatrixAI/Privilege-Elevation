@@ -5,6 +5,7 @@ AC_PROG_CC
 AC_LANG(C)
 AC_CHECK_HEADER([sys/un.h], [], [AC_MSG_ERROR([<sys/un.h> is required.])])
 AC_CHECK_HEADER([ftw.h],    [], [AC_MSG_ERROR([<ftw.h> is required.])])
+AC_CHECK_HEADER([math.h],    [], [AC_MSG_ERROR([<math.h> is required.])])
 
 AC_PROG_INSTALL
 AC_PROG_RANLIB

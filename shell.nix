@@ -24,6 +24,6 @@
         # autoreconfHook will run autoreconf --install --force --verbose
         # polkit will be added to the PATH environment
 
-        propagatedBuildInputs = [ autoreconfHook polkit ];
+        buildInputs = [ autoreconfHook polkit ];
 
     }
