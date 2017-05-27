@@ -5,6 +5,8 @@ Makefile
 /policy/ai.matrix.pkexec.file-descriptor-example.policy
 .*
 !/.gitignore
+/open-serial-device
+/privilege-elevation
 
 # Prerequisites
 *.d

@@ -19,18 +19,14 @@ open_serial_device_CFLAGS = -Iargparse
 open_serial_device_LDADD = argparse/libargparse.a
 open_serial_device_LDFLAGS = -lm
 
+noinst_LIBRARIES = argparse/libargparse.a
+argparse_libargparse_a_SOURCES = argparse/argparse.c
+argparse_libargparse_a_CFLAGS = -fPIC
+argparse_libargparse_a_AR = $(AR) rcs
+
 dist_polkitaction_DATA = policy/ai.matrix.pkexec.privilege-elevation.policy
+
+EXTRA_DIST = README.md default.nix shell.nix argparse
 
 install-data-hook:
 	sed --in-place --expression='s/MECHANISM_PATH/$(subst /,\/,$(mechanism_path))/g' $(DESTDIR)$(datadir)/polkit-1/actions/ai.matrix.pkexec.privilege-elevation.policy
-
-argparse/libargparse.a: Makefile
-	cd argparse && $(MAKE) $(AM_MAKEFLAGS) all
-
-check-local:
-	cd argparse && $(MAKE) $(AM_MAKEFLAGS) test
-
-clean-local:
-	cd argparse && $(MAKE) $(AM_MAKEFLAGS) clean && rm -f *.so
-
-EXTRA_DIST = README.md default.nix shell.nix argparse

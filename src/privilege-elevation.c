@@ -1,41 +1,50 @@
-#define _GNU_SOURCE     // needed for for struct ucred and ntfw
+#define _GNU_SOURCE
 
-#include <ftw.h>        // nftw()
-#include <stdlib.h>     // EXIT_FAILURE, exit(), mkdtemp(), getenv(), atexit()
-#include <stdio.h>      // printf(), snprintf(), remove()
-#include <stddef.h>     // NULL
-#include <stdbool.h>    // bool, true, false
-#include <string.h>     // size_t, strcmp(), strcpy()
-#include <unistd.h>     // read(), write(), fork(), exec(), getpid(), getppid()
-#include <errno.h>      // perror()
-#include <sysexits.h>   // EX_USAGE, EX_CANTCREAT, EX_UNAVAILABLE
-#include <libgen.h>     // basename()
-#include <fcntl.h>      // fcntl()
-#include <sys/socket.h> // PF_UNIX, SOCK_STREAM, CMSG_SPACE, socklen_t, struct ucred, struct msghdr, socket(), bind(), listen(), accept(), getsockopt
-#include <linux/un.h>   // UNIX_PATH_MAX, struct sockaddr_un
-#include <sys/types.h>  // pid_t
-#include <sys/wait.h>   // waitpid()
-#include <sys/select.h> // pselect()
-#include <sys/prctl.h>  // PR_SET_PDEATHSIG, prctl()
-#include <signal.h>     // SIGCHLD, SIGTERM, sigset_t, struct sigaction, sigemptyset(), sigaddset(), sigprocmask(), sigaction()
-#include <assert.h>     // assert()
+#include <stdlib.h>
+#include <stdio.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+#include <errno.h>
+#include <sysexits.h>
+
+#include <unistd.h>
+#include <fcntl.h>
+
+#include <string.h>
+#include <libgen.h>
+#include <ftw.h>
+
+#include <signal.h>
+
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <linux/un.h>
+
+#include <sys/types.h>
+#include <sys/prctl.h>
+
+#include <assert.h>
 
 #include "argparse.h"
 #include "protocol.h"
-
-#define STR(s) #s
-#define XSTR(s) STR(s)
 
 #if !defined(PKEXEC_PATH) || !defined(MECHANISM_PATH)
   #error "PKEXEC_PATH and MECHANISM_PATH must be defined."
 #endif
 
+#define STR(s) #s
+#define XSTR(s) STR(s)
+
+static int status;
+static size_t size;
+static ssize_t ssize;
+
+static int unix_sock_fd;
+static int unix_peer_fd;
 static char * unix_sock_dir;
 
-static int unix_sock_fd = -1;
-static int unix_peer_fd = -1;
-
-static volatile sig_atomic_t mechanism_status= -1;
+static volatile sig_atomic_t mechanism_status = -1;
 
 static int
 nftw_callback (
@@ -45,7 +54,7 @@ nftw_callback (
   struct FTW * ftw_buf
 ) {
 
-  int status = remove(path);
+  status = remove(path);
 
   if (status != 0) {
     char error_string[8 + UNIX_PATH_MAX];
@@ -123,7 +132,7 @@ handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 }
 
 static bool
-check_peer_pid (int peer_sock_fd, int peer_pid) {
+check_peer_pid (int peer_sock_fd, pid_t peer_pid) {
 
   struct ucred peer_credentials;
   int peer_credentials_size = sizeof(peer_credentials);
@@ -140,89 +149,6 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
   }
 
   return (peer_credentials.pid == peer_pid);
-
-}
-
-static int
-exec_mechanism (const char * process_path, const char * const process_arguments[]) {
-
-  // setup a pipe for between parent and forked child process
-  // to communicate errors during the fork prior to the exec
-  int exec_pipe[2];
-  if (pipe(exec_pipe) != 0) {
-    return -1;
-  }
-
-  pid_t parent_pid = getpid();
-  pid_t mechanism_pid = fork();
-
-  if (mechanism_pid == -1) {
-
-    perror("fork()");
-
-  } else if (mechanism_pid == 0) {
-
-    // close the read side in the child
-    close(exec_pipe[0]);
-
-    // if the parent dies, we want the child to commit suicide
-    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) {
-      // if the parent had died, this would result in a SIGPIPE
-      // which close the parent process as well
-      if (write(exec_pipe[1], &errno, sizeof(errno)));
-      exit(EX_OSERR);
-    }
-
-    // what if the parent already died!? If so we must die
-    // since there's no parent, there's no point writing to the exec pipe
-    if (getppid() != parent_pid) {
-      exit(EX_UNAVAILABLE);
-    }
-
-    // set the write side to close if the subsequent exec works
-    // this doesn't guarantee that the mechanism process succeeds
-    // only that the fork + exec worked
-    if ((fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC)) == -1) {
-      if (write(exec_pipe[1], &errno, sizeof(errno)));
-      exit(EX_OSERR);
-    }
-
-    // execute the process with the arguments
-    // the child process can access file descriptors in the parent
-    // however we need to pass file descriptors from the child to the parent
-    // so we'll be using unix domain sockets for communication
-    execv(process_path, (char * const *) process_arguments);
-
-    // exec failed, we must write the errno into the pipe
-    if (write(exec_pipe[1], &errno, sizeof(errno)));
-
-    // exit the child process
-    exit(EX_UNAVAILABLE);
-
-  }
-
-  if (mechanism_pid == -1) {
-    return -1;
-  }
-
-  // close the write end on the parent
-  close(exec_pipe[1]);
-
-  // this blocks until we either receive a close or an actual write
-  // on close, the size of the read will be 0
-  // on write, the size of the read will be > 0
-  // we use close to mean successful exec
-  // we use write to mean there was an error
-  int exec_errno;
-  if (read(exec_pipe[0], &exec_errno, sizeof(exec_errno)) > 0) {
-    errno = exec_errno;
-    return -1;
-  }
-
-  // exec succeeded, close the read end
-  close(exec_pipe[0]);
-
-  return mechanism_pid;
 
 }
 
@@ -276,7 +202,7 @@ setup_unix_sock (const char * sock_path, int backlog, bool nonblocking) {
 
   struct sockaddr_un unix_sock_addr;
   unix_sock_addr.sun_family = AF_UNIX;
-  strcpy(unix_sock_addr.sun_path, sock_path);
+  snprintf(unix_sock_addr.sun_path, UNIX_PATH_MAX, "%s", sock_path);
 
   int unix_sock_fd = socket(PF_UNIX, SOCK_STREAM, 0);
   if (unix_sock_fd < 0) {
@@ -310,7 +236,92 @@ setup_unix_sock (const char * sock_path, int backlog, bool nonblocking) {
 }
 
 static int
-wait_for_read (
+exec_mechanism (
+  const char * process_path,
+  const char * const process_arguments[],
+  pid_t * mechanism_pid
+) {
+
+  // setup a pipe for between parent and forked child process
+  // to communicate errors during the fork prior to the exec
+  int exec_pipe[2];
+  if (pipe(exec_pipe) != 0) {
+    return 0;
+  }
+
+  pid_t parent_pid = getpid();
+  pid_t child_pid = fork();
+
+  if (child_pid == -1) {
+
+    return -1;
+
+  } else if (child_pid == 0) {
+
+    // close the read side in the child
+    close(exec_pipe[0]);
+
+    // if the parent dies, we want the child to commit suicide
+    if (prctl(PR_SET_PDEATHSIG, SIGTERM) == -1) {
+      // if the parent had died, this would result in a SIGPIPE
+      // which close the parent process as well
+      if (write(exec_pipe[1], &errno, sizeof(errno)));
+      exit(EX_OSERR);
+    }
+
+    // what if the parent already died!? If so we must die
+    // since there's no parent, there's no point writing to the exec pipe
+    if (getppid() != parent_pid) {
+      exit(EX_UNAVAILABLE);
+    }
+
+    // set the write side to close if the subsequent exec works
+    // this doesn't guarantee that the mechanism process succeeds
+    // only that the fork + exec worked
+    if ((fcntl(exec_pipe[1], F_SETFD, FD_CLOEXEC)) == -1) {
+      if (write(exec_pipe[1], &errno, sizeof(errno)));
+      exit(EX_OSERR);
+    }
+
+    // execute the process with the arguments
+    // the child process can access file descriptors in the parent
+    // however we need to pass file descriptors from the child to the parent
+    // so we'll be using unix domain sockets for communication
+    execv(process_path, (char * const *) process_arguments);
+
+    // exec failed, we must write the errno into the pipe
+    if (write(exec_pipe[1], &errno, sizeof(errno)));
+
+    // exit the child process
+    exit(EX_UNAVAILABLE);
+
+  }
+
+  // close the write end on the parent
+  close(exec_pipe[1]);
+
+  // this blocks until we either receive a close or an actual write
+  // on close, the size of the read will be 0
+  // on write, the size of the read will be > 0
+  // we use close to mean successful exec
+  // we use write to mean there was an error
+  int exec_errno;
+  if (read(exec_pipe[0], &exec_errno, sizeof(exec_errno)) > 0) {
+    errno = exec_errno;
+    return -2;
+  }
+
+  // exec succeeded, close the read end
+  close(exec_pipe[0]);
+
+  *mechanism_pid = child_pid;
+
+  return 1;
+
+}
+
+static int
+wait_for_message (
   int sock_fd,
   sigset_t * signal_mask
 ) {
@@ -321,7 +332,7 @@ wait_for_read (
 
   while (1) {
 
-    int status = pselect(1, &readfds, NULL, NULL, NULL, signal_mask);
+    status = pselect(1, &readfds, NULL, NULL, NULL, signal_mask);
     if (status == -1) {
 
       if (errno != EINTR) {
@@ -350,7 +361,7 @@ wait_for_read (
 
 }
 
-static bool
+static int
 launch_mechanism (
   const char * mechanism_path,
   const char * const * mechanism_args,
@@ -358,31 +369,38 @@ launch_mechanism (
   const char * const * pkexec_args,
   int sock_fd,
   sigset_t * signal_mask,
-  int * mechanism_pid,
+  pid_t * mechanism_pid,
   bool privileged
 ) {
 
-  int pid;
   if (!privileged) {
-    pid = exec_mechanism(mechanism_path, mechanism_args);
+    status = exec_mechanism(mechanism_path, mechanism_args, mechanism_pid);
   } else {
-    pid = exec_mechanism(pkexec_path, pkexec_args);
+    status = exec_mechanism(pkexec_path, pkexec_args, mechanism_pid);
   }
 
-  if (pid == -1) {
-    return false;
+  if (!status) {
+    return -3;
   }
 
-  int status = wait_for_read(sock_fd, signal_mask);
+  status = wait_for_message(sock_fd, signal_mask);
 
   switch (status) {
   case 1:
-    *mechanism_pid = pid;
-    return true;
+    return 1;
   case -1:
-    return launch_mechanism(mechanism_path, mechanism_args, pkexec_path, pkexec_args, sock_fd, signal_mask, mechanism_pid, true);
+    return launch_mechanism(
+      mechanism_path,
+      mechanism_args,
+      pkexec_path,
+      pkexec_args,
+      sock_fd,
+      signal_mask,
+      mechanism_pid,
+      true
+    );
   default:
-    return false;
+    return status;
   }
 
 }
@@ -393,11 +411,6 @@ main (int argc, const char * const * argv) {
   /* SETUP ENVIRONMENT */
 
   atexit(cleanup_and_exit);
-
-  // temporary variables
-  int status;
-  size_t size;
-  ssize_t ssize;
 
   // permanent variables
   const char * tmp_dir= getenv("TMPDIR");
@@ -418,7 +431,7 @@ main (int argc, const char * const * argv) {
   uint32_t baud = 0;
   const char * serial_port;
 
-  char * * argv_ = malloc(sizeof(char *) * argc);
+  const char * * argv_ = malloc(sizeof(char *) * argc);
   if (!parse_args(argc, argv, argv_, &baud, &serial_port)) {
     exit(EX_USAGE);
   }
@@ -481,9 +494,13 @@ main (int argc, const char * const * argv) {
 
   /* EXECUTION CODE */
 
+  char selected_baud[7];
+  snprintf(selected_baud, sizeof(selected_baud), "%u", baud);
+
   const char * const mechanism_args[] = {
     mechanism_name,
     serial_port,
+    selected_baud,
     unix_sock_path,
     (char *) NULL
   };
@@ -492,11 +509,12 @@ main (int argc, const char * const * argv) {
     pkexec_name,
     mechanism_path,
     serial_port,
+    selected_baud,
     unix_sock_path,
     (char *) NULL
   };
 
-  int mechanism_pid;
+  pid_t mechanism_pid = 0;
 
   if (!launch_mechanism(
     mechanism_path,
@@ -515,6 +533,7 @@ main (int argc, const char * const * argv) {
   struct sockaddr_un unix_peer_addr = {0};
   socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
 
+  // the accepted connection is not non-blocking
   unix_peer_fd = accept(
     unix_sock_fd,
     (struct sockaddr *) &unix_peer_addr,
@@ -526,6 +545,8 @@ main (int argc, const char * const * argv) {
     exit(EX_OSERR);
   }
 
+  close(unix_sock_fd);
+
   if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
     fprintf(stderr, "%s\n", "Unknown peer pid");
     exit(EX_PROTOCOL);
@@ -534,8 +555,6 @@ main (int argc, const char * const * argv) {
   shutdown(unix_peer_fd, SHUT_WR);
 
   /* RECEIVE CODE */
-
-  // the accepted connection is not non-blocking
 
   // the buffer for our message
   char message_buffer[sizeof(MechanismProto)] = {0};
@@ -583,7 +602,7 @@ main (int argc, const char * const * argv) {
     exit(EX_SOFTWARE);
   }
 
-  MechanismProto message;
+  MechanismProto message = {0};
   message.type = message_buffer[0];
 
   if (message.type != PRIVFD) {
@@ -614,6 +633,7 @@ main (int argc, const char * const * argv) {
 
   ssize = write(serial_port_fd, "Hello World", 11);
   if (ssize != 11) {
+    fprintf(stderr, "Could not write to serial port");
     exit(EX_IOERR);
   }
 
