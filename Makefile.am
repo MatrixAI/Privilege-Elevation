@@ -4,20 +4,20 @@ mechanism_path = $(mechanisms_path)/open-serial-device
 polkitactiondir = $(datadir)/polkit-1/actions
 
 AM_CFLAGS = -Wall
-AM_LDFLAGS = -lm
 
 bin_PROGRAMS = privilege-elevation
 
 privilege_elevation_SOURCES = src/privilege-elevation.c
 privilege_elevation_CFLAGS = -Iargparse -DPKEXEC_PATH=\"$(pkexec_path)\" -DMECHANISM_PATH=\"$(mechanism_path)\"
 privilege_elevation_LDADD = argparse/libargparse.a
-
+privilege_elevation_LDFLAGS = -lm
 
 pkglibexec_PROGRAMS = open-serial-device
 
 open_serial_device_SOURCES = src/open-serial-device.c
 open_serial_device_CFLAGS = -Iargparse
 open_serial_device_LDADD = argparse/libargparse.a
+open_serial_device_LDFLAGS = -lm
 
 dist_polkitaction_DATA = policy/ai.matrix.pkexec.privilege-elevation.policy
 

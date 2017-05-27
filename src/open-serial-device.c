@@ -45,8 +45,8 @@ set_tty_attribs (int fd, speed_t speed) {
 
     // here we setup the non-blocking non-canonical mode
     // this means O_NONBLOCK must not be set on the file descriptor
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 0;
+    tty_attribs.c_cc[VMIN] = 0;
+    tty_attribs.c_cc[VTIME] = 0;
 
     // set the modified attributes
     if (tcsetattr(fd, TCSANOW, &tty_attribs) != 0) {
@@ -87,7 +87,7 @@ main (int argc, const char * * argv) {
     struct argparse argparse;
 
     argparse_init(&argparse, command_options, command_usage, 0);
-    argparse_describe(&argparse, "\nThis is to be executed as a child process. It will open the serial port and pass the file descriptor back to the parent process through the unix domain socket.");
+    argparse_describe(&argparse, "\nThis is to be executed as a child process. It will open the serial port and pass the file descriptor back to the parent process through the unix domain socket.", "");
 
     // make sure the original argc and argv is preserved
     const char * * argv_ = malloc(sizeof (char *) * argc);

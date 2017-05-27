@@ -1,5 +1,4 @@
-#define _GNU_SOURCE
-#define _XOPEN_SOURCE 500
+#define _GNU_SOURCE     // needed for for struct ucred and ntfw
 
 #include <ftw.h>        // nftw()
 #include <stdlib.h>     // EXIT_FAILURE, exit(), mkdtemp(), getenv(), atexit()
@@ -11,7 +10,6 @@
 #include <errno.h>      // perror()
 #include <sysexits.h>   // EX_USAGE, EX_CANTCREAT, EX_UNAVAILABLE
 #include <libgen.h>     // basename()
-#include <assert.h>     // assert()
 #include <fcntl.h>      // fcntl()
 #include <sys/socket.h> // PF_UNIX, SOCK_STREAM, CMSG_SPACE, socklen_t, struct ucred, struct msghdr, socket(), bind(), listen(), accept(), getsockopt
 #include <linux/un.h>   // UNIX_PATH_MAX, struct sockaddr_un
@@ -20,6 +18,7 @@
 #include <sys/select.h> // pselect()
 #include <sys/prctl.h>  // PR_SET_PDEATHSIG, prctl()
 #include <signal.h>     // SIGCHLD, SIGTERM, sigset_t, struct sigaction, sigemptyset(), sigaddset(), sigprocmask(), sigaction()
+#include <assert.h>     // assert()
 
 #include "argparse.h"
 #include "protocol.h"
@@ -28,10 +27,8 @@
 #define XSTR(s) STR(s)
 
 #if !defined(PKEXEC_PATH) || !defined(MECHANISM_PATH)
-    #error "PKEXEC_PATH and MECHANISM_PATH must be defined."
+  #error "PKEXEC_PATH and MECHANISM_PATH must be defined."
 #endif
-
-/* static char unix_sock_dir[UNIX_PATH_MAX] = {0}; */
 
 static char * unix_sock_dir;
 
@@ -41,33 +38,33 @@ static int unix_peer_fd = -1;
 static volatile sig_atomic_t mechanism_status= -1;
 
 static int
-ntfw_callback (
+nftw_callback (
   const char * path,
   const struct stat * sb,
   int type_flag,
   struct FTW * ftw_buf
 ) {
 
-    int status = remove(path);
+  int status = remove(path);
 
-    if (status != 0) {
-        char error_string[8 + UNIX_PATH_MAX];
-        snprintf(error_string, sizeof(error_string), "remove(%s)", path);
-        perror(error_string);
-    }
+  if (status != 0) {
+    char error_string[8 + UNIX_PATH_MAX];
+    snprintf(error_string, sizeof(error_string), "remove(%s)", path);
+    perror(error_string);
+  }
 
-    return status;
+  return status;
 
 }
 
 static void
 cleanup_and_exit () {
 
-    if (unix_peer_fd) close(unix_peer_fd);
-    if (unix_sock_fd) close(unix_sock_fd);
-    if (unix_sock_dir && *unix_sock_dir) {
-        ntfw(unix_sock_dir, ntfw_callback, 64, FTW_DEPTH | FTW_PHYS);
-    }
+  if (unix_peer_fd) close(unix_peer_fd);
+  if (unix_sock_fd) close(unix_sock_fd);
+  if (unix_sock_dir && *unix_sock_dir) {
+      nftw(unix_sock_dir, nftw_callback, 64, FTW_DEPTH | FTW_PHYS);
+  }
 
 }
 
@@ -131,14 +128,13 @@ check_peer_pid (int peer_sock_fd, int peer_pid) {
   struct ucred peer_credentials;
   int peer_credentials_size = sizeof(peer_credentials);
   if (
-      getsockopt(
-                 peer_sock_fd,
-                 SOL_SOCKET,
-                 SO_PEERCRED,
-                 &peer_credentials,
-                 &peer_credentials_size
-                 )
-      != 0
+    getsockopt(
+      peer_sock_fd,
+      SOL_SOCKET,
+      SO_PEERCRED,
+      &peer_credentials,
+      &peer_credentials_size
+    ) != 0
   ) {
     return false;
   }
@@ -234,12 +230,12 @@ static bool
 parse_args (
   int argc,
   const char * const * argv,
-  char * * argv_,
+  const char * * argv_,
   uint32_t * baud,
   const char * * serial_port
 ) {
 
-  memcpy(argv_, argv, sizeof(char *) * argc);
+  memcpy((char * *) argv_, argv, sizeof(char *) * argc);
 
   static const char * const command_usage[] = {
     "privilege-elevation [options] [--] <serial-port-path>",
@@ -262,7 +258,7 @@ parse_args (
 
   argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.", "");
 
-  int argc_ = argparse_parse(&argparse, argc, (const char * *) argv_);
+  int argc_ = argparse_parse(&argparse, argc, argv_);
 
   if (argc_ < 1) {
     argparse_usage(&argparse);
@@ -431,7 +427,7 @@ main (int argc, const char * const * argv) {
     baud = 9600;
   }
 
-  assert(UNIX_PATH_MAX <=
+  assert(UNIX_PATH_MAX >=
     (
       strlen(tmp_dir) +
       sizeof(tmp_name) +
