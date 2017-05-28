@@ -1,15 +1,76 @@
 Privilege-Elevation
 ===================
 
-Development:
+Installation
+-------------
 
-Run: `nix-shell`.
+### If on Nix:
 
-Run `./bootstrap`.
+Download the release tarball or `git clone`:
 
-Run `./configure`, `make`, `make install`.
+```
+nix-build ./Privilege-Elevation
+./result/bin/privilege-elevation
+```
 
-Check `make distcheck` and `make dist`.
+The above will build into the NixOS store and leave a symlink to access the built folder.
+
+To actually install it into your profile (so you can call it from PATH):
+
+```sh
+nix-env --file ./Privilege-Elevation --install privilege-elevation
+```
+
+To uninstall it:
+
+```sh
+nix-env --uninstall privilege-elevation
+```
+
+### Not on Nix:
+
+Download the release tarball:
+
+```sh
+tax xvfz ./privilege-elevation-X.X.X.tar.gz
+cd privilege-elevation-X.X.X
+./configure
+make
+make install
+```
+
+Git clone:
+
+```sh
+git clone https://github.com/MatrixAI/Privilege-Elevation.git 
+cd Privilege-Elevation
+./bootstrap
+./configure
+make
+make install
+```
+
+To uninstall it:
+
+```sh
+make uninstall
+```
+
+Development
+------------
+
+On Nix supported system, first setup the Nix shell by running `nix-shell` inside the root of this repository. Still trying to make `nix-shell` run `./bootstrap` and `./configure` prior to launching.
+
+Run these:
+
+```sh
+./bootstrap
+./configure
+make distcheck
+make dist
+```
+
+---
 
 Executing privilege-elevation should demonstrate the opening of a serial port.
 So you pass a serial port in. Upon attempting to execute it, it is going to run
@@ -26,92 +87,30 @@ uses polkit to check whether the client is allowed, and if allowed performs the 
 We don't have a daemon here, so we rely on pkexec to launch an authorised by superuser
 program and use the same functionality to trigger a privilege elevation request.
 
-https://lwn.net/Articles/176911/
-https://jineshkj.wordpress.com/2008/02/02/why-pselect/
-https://linux.die.net/man/2/pselect
-http://pubs.opengroup.org/onlinepubs/009695399/functions/accept.html
-https://linux.die.net/man/2/waitpid
-https://cr.yp.to/docs/selfpipe.html
-
-> File descriptors can be sent from one process to another by two means. One way is by inheritance, the other is by passing through a unix domain socket. There are three reasons I know of why one might do this. The first is that on platforms that don't have a credentials passing mechanism but do have a file descriptor passing mechanism, an authentication scheme based on file system privilege demonstration could be used instead. The second is if one process has file system privileges that the other does not. The third is scenarios where a server will hand a connection's file descriptor to another already started helper process of some kind. Again this area is different from OS to OS. On Linux this is done with a socket feature known as ancillary data.
-
-> It works by one side sending some data to the other (at least 1 byte) with attached ancillary data. Normally this facility is used for odd features of various underlying network protocols, such as TCP/IP's out of band data. This is accomplished with the lower level socket function sendmsg() that accepts both arrays of IO vectors and control data message objects as members of its struct msghdr parameter. Ancillary, also known as control, data in sockets takes the form of a struct cmsghdr. The members of this structure can mean different things based on what type of socket it is used with. Making it even more squirrelly is that most of these structures need to be modified with macros. Here are two example functions based on the ones available in Warren Gay's book mention at the end of this article. A socket's peer that read data sent to it by send_fd() without using recv_fd() would just get a single capital F.
-
-* http://stackoverflow.com/questions/6947413/how-to-open-read-and-write-from-serial-port-in-c
-
 ---
 
-NIXOS/NIX
+`$out` is the nix store path.
 
-Remember everything is built inside the `/tmp/...` directory which is notated as "$out". The make file should itself understand to put thigns there into "$out". But where is "$out"? It's not the `/tmp/...` path right, it must be the nix store path!
+The `default.nix` can be used to create out-of-tree Nixpkgs packages. The resulting nix file can imported into a configuration.nix or nix-build, or used by nix-env.
 
-Another option is:
-
-```
-  patchPhase = ''
-    substituteInPlace Makefile.am --replace "/usr" ""
-  '';
-```
-
-Which I guess runs a subtitution on the Makefile itself, replacing `/usr` with the real path.
-
-A default.nix inside this repo would be an outside of nixpkgs tree. This is because this an example application, and not intended to be part of the official nixpkgs distribution or release. To run this default.nix, it's easy. It's possible to import the file directly into configuration.nix and run it as asystem package. Or better yet, run `nix-build` directly on it, and you get a corresponding release file which is a symlink to the built folder. It's described here: https://nixos.org/nixos/manual/index.html#sec-custom-packages
+The built folder should look something like:
 
 ```
-git clone this-repo
-nix-build this-repo # or nix-build this-repo/default.nix
-./result/bin/file-descriptor-client
-```
-
-```
-environment.systemPackages = [ (import ./my-hello.nix) ];
-```
-
-Using it this way, is actually quite similar to writing a npm config file or a composer config file.. etc. Basically it's not submitted to the public index which in this case is the nixpkgs github repo and associated channel release mechanics. And using `nix-build` is the same as using `composer install https://github.com/...`. Except you need to git-clone it first.
-
-Note that nix-copy-closure is not relevant, and neither is nix-install-package (this is being deprecated too).
-
-While `nix-build` would build thepackage, what actually installs it into the user environment? It would require using `nix-env` right? Yea it's actually `nix-env` that installs it into the environment. So we should be using that:
-
-```
-# get specific tree
-nix-env --file https://github.com/....tar.gz --install file-descriptor-example-0.0.1
-
-# get generic tree
-nix-env --file https://github.com/....tar.gz --install file-descriptor-example
-```
-
-This is especially true, since we need to activate the capability of polkit, and nix-build wouldn't be able to do this!
-
-To uninstall it appears to be like:
-
-```
-nix-env --uninstall file-descriptor-example
-```
-
-Remember names must be unique when put together, so this ends up working...
-
-I also think different versions can be installed, but must have different names.
-
-The build  folder will be:
-
-```
-├───bin
-├───libexec
-│   └───file-descriptor-example
-└───share
-    ├───man
-    │   └───man1
-    └───polkit-1              
+result
+├── bin
+│   └── privilege-elevation
+├── libexec
+│   └── privilege-elevation
+│       └── open-serial-device
+└── share
+    └── polkit-1
+        └── actions
+            └── ai.matrix.pkexec.privilege-elevation.policy
 ```
 
 This is what needs to built in "$out".
 
-Now I need to know how the crap the paths are being redefined for libexec.
-
-Turns out that this is done with autoconf. Here is an example:
-
-https://www.gnu.org/software/gnats/doc/gnats-4.1.999/html_node/exec_002dprefix.html
+How to push things into libexec?
 
 Gstreamer has a similar situation, with one of their executables being part of:
 
@@ -149,23 +148,11 @@ These include C(++) headers, pkg-config, cmake and aclocal files.
 
 There's a few others: https://github.com/NixOS/nixpkgs/blob/master/doc/multiple-output.xml
 
-Need to do this on a Linux computer.
+Apparently the $outputLib is meant for libraries, residing in lib or libexec.
 
-On the maintainer:
+The most important is to figure out how to install the policy file. But that might be automatic.
 
-```
-autoreconf --force --install --verbose
-./configure
-make distcheck
-make dist
-```
+Remember that network-manager has one too.
 
-On the end user:
+Wait it's just symlinks. I think.
 
-```
-tax xvfz ./package.tar.gz
-cd package
-./configure
-make
-make install
-```

@@ -2,11 +2,11 @@
 Makefile
 /config.log
 /config.status
-/policy/ai.matrix.pkexec.file-descriptor-example.policy
-.*
-!/.gitignore
 /open-serial-device
-/privilege-elevation*
+/privilege-elevation
+/privilege-elevation*.tar.gz
+/result
+.*
 
 # Prerequisites
 *.d
