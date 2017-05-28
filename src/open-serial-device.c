@@ -15,12 +15,10 @@
 
 #include <assert.h>
 
-#include "argparse.h"
+#include "argparse/argparse.h"
 #include "baudrates.h"
 #include "protocol.h"
 
-static int status;
-static size_t size;
 static ssize_t ssize;
 
 static int
@@ -177,7 +175,8 @@ main (int argc, const char * const * argv) {
   control_message->cmsg_type = SCM_RIGHTS;
   control_message->cmsg_len = CMSG_LEN(sizeof(int));
 
-  *((int *) CMSG_DATA(control_message)) = serial_fd;
+  int * ancillary_p = (int *) CMSG_DATA(control_message);
+  *ancillary_p = serial_fd;
 
   ssize = sendmsg(unix_sock_fd, &message_options, 0);
 

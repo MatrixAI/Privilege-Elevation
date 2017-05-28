@@ -26,7 +26,7 @@
 
 #include <assert.h>
 
-#include "argparse.h"
+#include "argparse/argparse.h"
 #include "protocol.h"
 
 #if !defined(PKEXEC_PATH) || !defined(MECHANISM_PATH)

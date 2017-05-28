@@ -6,7 +6,7 @@ Makefile
 .*
 !/.gitignore
 /open-serial-device
-/privilege-elevation
+/privilege-elevation*
 
 # Prerequisites
 *.d
