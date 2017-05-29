@@ -8,9 +8,9 @@ Installation
 
 Download the release tarball or `git clone`:
 
-```
+```sh
 nix-build ./Privilege-Elevation
-./result/bin/privilege-elevation
+./result/bin/Privilege-Elevation/privilege-elevation
 ```
 
 The above will build into the NixOS store and leave a symlink to access the built folder.
@@ -61,13 +61,45 @@ Development
 
 On Nix supported system, first setup the Nix shell by running `nix-shell` inside the root of this repository. Still trying to make `nix-shell` run `./bootstrap` and `./configure` prior to launching.
 
-Run these:
+Run these at the root of the project:
 
 ```sh
 ./bootstrap
 ./configure
 make distcheck
 make dist
+``` 
+
+To check if Nix building works:
+
+```sh
+make clean
+nix-build
+```
+
+If you don't clean the root, `nix-build` won't compile again, and this may result in incorrect environment variables or macros being used.
+
+Usage
+-----
+
+You need `socat` to create virtual serial ports, `picocom` to act as terminals to the serial ports, `polkit` as the daemon to manage privilege elevation, and a `polkit` agent running in your desktop environment to provide GUI prompt for user authorisation. If you cannot run a GUI `polkit` agent, you can use `pkttyagent --process $$` but then make sure the PID passed into the `--process` option is the PID of the terminal process where you'll run `privilege-elevation`.
+
+Open 3 terminals. On the first one run (this will tell you the path to serial ports):
+
+```sh
+socat -d -d pty,raw,echo=0 pty,raw,echo=0
+```
+
+On the second terminal, run:
+
+```sh
+picocom --baud 9600 --imap crclf --echo <path/to/serial/port1>
+``` 
+
+On the third terminal, run:
+
+```sh
+privilege-elevation --baud=9600 </path/to/serial/port2>
 ```
 
 ---

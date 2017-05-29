@@ -152,8 +152,17 @@ main (int argc, const char * const * argv) {
     .type = PRIVFD
   };
 
-  char message_buffer[sizeof(MechanismProto)] = {0};
-  message_buffer[0] = message.type;
+  uint8_t type_buffer[1] = {0};
+  type_buffer[0] = message.type;
+
+  char message_buffer[sizeof(type_buffer)] = {0};
+  memcpy(message_buffer, type_buffer, sizeof(type_buffer));
+
+  printf("Child Process Buffer!\n");
+  for (int i = 0; i < sizeof(message_buffer); ++i) {
+    printf("0x%02X", message_buffer[i]);
+  }
+  printf("\n");
 
   struct iovec io_vector[1] = {
     {
@@ -178,12 +187,16 @@ main (int argc, const char * const * argv) {
   int * ancillary_p = (int *) CMSG_DATA(control_message);
   *ancillary_p = serial_fd;
 
+  printf("Child Process SEND!\n");
   ssize = sendmsg(unix_sock_fd, &message_options, 0);
+  printf("Child Process FIN SEND!\n");
 
-  if (ssize < sizeof(MechanismProto)) {
+  if (ssize < sizeof(message_buffer)) {
     perror("recvmsg()");
     exit(EX_OSERR);
   }
+
+  printf("Child Process FIN FIN!\n");
 
   exit(EXIT_SUCCESS);
 

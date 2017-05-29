@@ -33,8 +33,7 @@
   #error "PKEXEC_PATH and MECHANISM_PATH must be defined."
 #endif
 
-#define STR(s) #s
-#define XSTR(s) STR(s)
+static struct sigaction old_sigint_action;
 
 static int status;
 static size_t size;
@@ -57,7 +56,7 @@ nftw_callback (
   status = remove(path);
 
   if (status != 0) {
-    char error_string[8 + UNIX_PATH_MAX];
+    char error_string[8 + UNIX_PATH_MAX + 1];
     snprintf(error_string, sizeof(error_string), "remove(%s)", path);
     perror(error_string);
   }
@@ -74,6 +73,31 @@ cleanup_and_exit () {
   if (unix_sock_dir && *unix_sock_dir) {
       nftw(unix_sock_dir, nftw_callback, 64, FTW_DEPTH | FTW_PHYS);
   }
+
+}
+
+static void
+cleanup_and_exit_sigint (int signal, siginfo_t * signal_info, void * context) {
+
+  assert(signal == SIGINT);
+  cleanup_and_exit();
+  sigaction(SIGINT, &old_sigint_action, NULL);
+  kill(0, SIGINT);
+
+}
+
+static int
+handle (
+  int sig,
+  void (*handler)(int, siginfo_t *, void *),
+  int flags,
+  struct sigaction * old_action
+) {
+
+  struct sigaction action = {0};
+  action.sa_flags = flags;
+  action.sa_sigaction = handler;
+  return (sigaction(sig, &action, old_action) == 0);
 
 }
 
@@ -98,25 +122,8 @@ unblock_sigchld (sigset_t * signal_orig_mask) {
 
 }
 
-/**
- * Assigns a signal handler to SIGCHLD.
- * This should run after SIGCHLD is first blocked.
- */
-static int
-handle_sigchld (void (*handler)(int, siginfo_t *, void *), int flags) {
-
-  struct sigaction signal_action = {0};
-  signal_action.sa_flags = flags;
-  signal_action.sa_sigaction = handler;
-  return (sigaction(SIGCHLD, &signal_action, NULL) == 0);
-
-}
-
-/**
- * Handles the SIGCHLD from the mechanism process.
- */
 static void
-handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
+record_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
   assert(signal == SIGCHLD);
 
@@ -125,7 +132,10 @@ handle_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
   // in such a case we can handle its specific errors as well
   // 127 no pkexec perm and 126 user cancelled
 
-  if (signal_info->si_code == CLD_EXITED) {
+  switch (signal_info->si_code) {
+  case CLD_EXITED:
+  case CLD_KILLED:
+  case CLD_DUMPED:
     mechanism_status = signal_info->si_status;
   }
 
@@ -330,21 +340,22 @@ wait_for_message (
   FD_ZERO(&readfds);
   FD_SET(sock_fd, &readfds);
 
-  while (1) {
+  while (true) {
 
-    status = pselect(1, &readfds, NULL, NULL, NULL, signal_mask);
+    status = pselect(sock_fd + 1, &readfds, NULL, NULL, NULL, signal_mask);
     if (status == -1) {
 
       if (errno != EINTR) {
         return 0;
       }
 
-      if (mechanism_status != -1) {
-        if (mechanism_status == EX_NOPERM) {
-          return -1;
-        } else {
-          return -2;
-        }
+      switch (mechanism_status) {
+      case EXIT_SUCCESS:
+        break;
+      case EX_NOPERM:
+        return -1;
+      default:
+        return -2;
       }
 
       // if not interrupted from the mechanism, just continue
@@ -379,8 +390,13 @@ launch_mechanism (
     status = exec_mechanism(pkexec_path, pkexec_args, mechanism_pid);
   }
 
-  if (!status) {
-    return -3;
+  switch (status) {
+  case 0:
+    return 0;
+  case -1:
+    return -1;
+  case  -2:
+    return -2;
   }
 
   status = wait_for_message(sock_fd, signal_mask);
@@ -388,6 +404,8 @@ launch_mechanism (
   switch (status) {
   case 1:
     return 1;
+  case 0:
+    return -3;
   case -1:
     return launch_mechanism(
       mechanism_path,
@@ -399,8 +417,8 @@ launch_mechanism (
       mechanism_pid,
       true
     );
-  default:
-    return status;
+  case -2:
+    return -4;
   }
 
 }
@@ -411,6 +429,7 @@ main (int argc, const char * const * argv) {
   /* SETUP ENVIRONMENT */
 
   atexit(cleanup_and_exit);
+  handle(SIGINT, cleanup_and_exit_sigint, 0, &old_sigint_action);
 
   // permanent variables
   const char * tmp_dir= getenv("TMPDIR");
@@ -418,12 +437,12 @@ main (int argc, const char * const * argv) {
   const char tmp_name[] = "polkit_demo.XXXXXX";
   const char socket_name[] = "socket.sock";
 
-  char pkexec_path[] = XSTR(PKEXEC_PATH);
-  char mechanism_path[] = XSTR(MECHANISM_PATH);
+  char pkexec_path[] = PKEXEC_PATH;
+  char mechanism_path[] = MECHANISM_PATH;
 
-  char pkexec_name[] = XSTR(PKEXEC_PATH);
+  char pkexec_name[] = PKEXEC_PATH;
   basename(pkexec_name);
-  char mechanism_name[] = XSTR(MECHANISM_PATH);
+  char mechanism_name[] = MECHANISM_PATH;
   basename(mechanism_name);
 
   int serial_port_fd = -1;
@@ -448,7 +467,7 @@ main (int argc, const char * const * argv) {
     )
   );
 
-  char template[strlen(tmp_dir) + sizeof(tmp_name)];
+  char template[strlen(tmp_dir) + (sizeof(tmp_name) + 1)];
   snprintf(template, sizeof(template), "%s/%s", tmp_dir, tmp_name);
   unix_sock_dir = mkdtemp(template);
 
@@ -487,8 +506,8 @@ main (int argc, const char * const * argv) {
 
   // SA_SIGINFO for acquiring extra child process info
   // SA_NOCLDSTOP because we don't care about suspension or continued signals
-  if (!handle_sigchld(handle_mechanism_process, SA_SIGINFO | SA_NOCLDSTOP)) {
-    perror("handle_sigchld()");
+  if (!handle(SIGCHLD, record_mechanism_process, SA_SIGINFO | SA_NOCLDSTOP, NULL)) {
+    perror("handle()");
     exit(EX_OSERR);
   }
 
@@ -516,7 +535,7 @@ main (int argc, const char * const * argv) {
 
   pid_t mechanism_pid = 0;
 
-  if (!launch_mechanism(
+  status = launch_mechanism(
     mechanism_path,
     mechanism_args,
     pkexec_path,
@@ -525,19 +544,47 @@ main (int argc, const char * const * argv) {
     &signal_orig_mask,
     &mechanism_pid,
     false
-  )) {
-    perror("launch_mechanism()");
-    exit(EX_UNAVAILABLE);
+  );
+
+  char error_string[8 + sizeof(mechanism_path) + 1];
+  switch (status) {
+  case 0:
+    perror("pipe()");
+    exit(EX_OSERR);
+  case -1:
+    perror("fork()");
+    exit(EX_OSERR);
+  case -2:
+    snprintf(error_string, sizeof(error_string), "execv(%s)", mechanism_path);
+    perror(error_string);
+    exit(EX_OSERR);
+  case -3:
+    perror("pselect()");
+    exit(EX_TEMPFAIL);
+  case -4:
+    switch (mechanism_status) {
+    case 127:
+      fprintf(stderr, "Error: %s\n", "Polkit denied permission to elevate privileges");
+      exit(EX_NOPERM);
+    case 126:
+      fprintf(stderr, "Error: %s\n", "User denied permission to elevate privileges");
+      exit(EX_USAGE);
+    default:
+      fprintf(stderr, "Error: %s %i\n", "Mechanism failed with code:", mechanism_status);
+      exit(EX_SOFTWARE);
+    }
   }
 
   struct sockaddr_un unix_peer_addr = {0};
   socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
 
   // the accepted connection is not non-blocking
-  unix_peer_fd = accept(
-    unix_sock_fd,
-    (struct sockaddr *) &unix_peer_addr,
-    &unix_peer_addr_size
+  TEMP_FAILURE_RETRY(
+    unix_peer_fd = accept(
+      unix_sock_fd,
+      (struct sockaddr *) &unix_peer_addr,
+      &unix_peer_addr_size
+    )
   );
 
   if (unix_peer_fd == -1) {
@@ -548,7 +595,7 @@ main (int argc, const char * const * argv) {
   close(unix_sock_fd);
 
   if (!check_peer_pid(unix_peer_fd, mechanism_pid)) {
-    fprintf(stderr, "%s\n", "Unknown peer pid");
+    fprintf(stderr, "Error: %s\n", "Unknown peer pid");
     exit(EX_PROTOCOL);
   }
 
@@ -556,8 +603,12 @@ main (int argc, const char * const * argv) {
 
   /* RECEIVE CODE */
 
+  MechanismProto message = {0};
+
+  uint8_t type_buffer[1] = {0};
+
   // the buffer for our message
-  char message_buffer[sizeof(MechanismProto)] = {0};
+  char message_buffer[sizeof(type_buffer)] = {0};
 
   // gather vector
   struct iovec io_vector[1] = {
@@ -582,31 +633,48 @@ main (int argc, const char * const * argv) {
     exit(EX_OSERR);
   }
 
-  ssize = recvmsg(unix_peer_fd, &message_options, 0);
+  while (true) {
 
-  if (ssize == -1) {
-    if (errno == EINTR && mechanism_status != -1) {
-      perror("handle_sigchld");
-      exit(EX_UNAVAILABLE);
-    } else {
-      perror("recvmsg()");
-      exit(EX_OSERR);
+    ssize = recvmsg(unix_peer_fd, &message_options, 0);
+
+    if (ssize < sizeof(message_buffer)) {
+
+      if (ssize == -1) {
+        if (errno == EINTR) {
+          if (mechanism_status != -1 && mechanism_status != EXIT_SUCCESS) {
+            fprintf(stderr, "Error: %s %i\n", "Mechanism failed after connecting with code:", mechanism_status);
+            exit(EX_UNAVAILABLE);
+          }
+        } else {
+          perror("recvmsg()");
+          exit(EX_OSERR);
+        }
+      } else {
+        fprintf(stderr, "Error: %s\n", "Received incorrect message size from mechanism");
+        exit(EX_PROTOCOL);
+      }
+
     }
-  } else if (ssize == 0) {
-    fprintf(stderr, "%s\n", "Received nothing from mechanism");
-    exit(EX_PROTOCOL);
+
+    break;
+
   }
 
   if ((message_options.msg_flags & MSG_CTRUNC) == MSG_CTRUNC) {
-    fprintf(stderr, "%s\n", "Not enough space provided for ancillary data");
+    fprintf(stderr, "Error: %s\n", "Not enough space provided for ancillary data");
     exit(EX_SOFTWARE);
   }
 
-  MechanismProto message = {0};
-  message.type = message_buffer[0];
+  memcpy(type_buffer, message_buffer, sizeof(type_buffer));
+
+  message.type = type_buffer[0];
+
+  for (int i = 0; i < sizeof(message_buffer); ++i) {
+    printf("0x%02X", message_buffer[i]);
+  }
 
   if (message.type != PRIVFD) {
-    fprintf(stderr, "%s\n", "Unexpected message from mechanism");
+    fprintf(stderr, "Error: %s\n", "Unexpected message from mechanism");
     exit(EX_PROTOCOL);
   }
 
@@ -618,11 +686,11 @@ main (int argc, const char * const * argv) {
   ) {
     serial_port_fd = *((int *) CMSG_DATA(control_message));
   } else {
-    fprintf(stderr, "%s\n", "Unknown ancillary data from mechanism");
+    fprintf(stderr, "Error: %s\n", "Unknown ancillary data from mechanism");
   }
 
   if (serial_port_fd < 0) {
-    fprintf(stderr, "Did not get a file descriptor from the mechanism");
+    fprintf(stderr, "Error: %s\n", "Did not get a file descriptor from the mechanism");
     exit(EX_PROTOCOL);
   }
 
@@ -633,7 +701,7 @@ main (int argc, const char * const * argv) {
 
   ssize = write(serial_port_fd, "Hello World", 11);
   if (ssize != 11) {
-    fprintf(stderr, "Could not write to serial port");
+    fprintf(stderr, "Error: %s\n", "Could not write to serial port");
     exit(EX_IOERR);
   }
 
