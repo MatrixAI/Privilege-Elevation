@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <linux/un.h>
 
+#include <sys/param.h>
 #include <sys/types.h>
 #include <sys/prctl.h>
 
@@ -166,12 +167,15 @@ static bool
 parse_args (
   int argc,
   const char * const * argv,
-  const char * * argv_,
   uint32_t * baud,
   const char * * serial_port
 ) {
 
-  memcpy((char * *) argv_, argv, sizeof(char *) * argc);
+  // command, -option, option_value, --, param
+  unsigned int max_args = 5;
+
+  const char * * argv_[sizeof(char *) * max_args] = {0};
+  memcpy((char * *) argv_, argv, sizeof(argv_));
 
   static const char * const command_usage[] = {
     "privilege-elevation [options] [--] <serial-port-path>",
@@ -194,7 +198,7 @@ parse_args (
 
   argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.", "");
 
-  int argc_ = argparse_parse(&argparse, argc, argv_);
+  int argc_ = argparse_parse(&argparse, MIN(argc, max_args), argv_);
 
   if (argc_ < 1) {
     argparse_usage(&argparse);
@@ -450,8 +454,7 @@ main (int argc, const char * const * argv) {
   uint32_t baud = 0;
   const char * serial_port;
 
-  const char * * argv_ = malloc(sizeof(char *) * argc);
-  if (!parse_args(argc, argv, argv_, &baud, &serial_port)) {
+  if (!parse_args(argc, argv, &baud, &serial_port)) {
     exit(EX_USAGE);
   }
 

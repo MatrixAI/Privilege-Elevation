@@ -3,6 +3,7 @@ AM_INIT_AUTOMAKE([foreign subdir-objects])
 
 AC_PROG_CC
 AC_LANG(C)
+AC_CHECK_HEADER([sys/param.h], [], [AC_MSG_ERROR([<sys/param.h> is required.])])
 AC_CHECK_HEADER([linux/un.h], [], [AC_MSG_ERROR([<linux/un.h> is required.])])
 AC_CHECK_HEADER([ftw.h],    [], [AC_MSG_ERROR([<ftw.h> is required.])])
 AC_CHECK_HEADER([math.h],    [], [AC_MSG_ERROR([<math.h> is required.])])
