@@ -111,10 +111,11 @@ main (int argc, const char * const * argv) {
   // do not open in non-blocking mode when using non-canonical mode
   int serial_fd = open(serial_port, O_RDWR | O_NOCTTY | O_SYNC);
   if (serial_fd < 0) {
-    perror("open()");
     if (errno == EACCES) {
+      fprintf(stderr, "%s\n", "Could not open serial device, try with elevated privileges");
       exit(EX_NOPERM);
     } else {
+      perror("open()");
       exit(EX_UNAVAILABLE);
     }
   }

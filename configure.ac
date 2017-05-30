@@ -12,10 +12,9 @@ AC_PROG_INSTALL
 AC_PROG_RANLIB
 m4_ifdef([AM_PROG_AR], [AM_PROG_AR])
 
-dnl Substitute the PKEXEC_PATH
-AC_PATH_PROG([PKEXEC_PATH], [pkexec])
-if test -z "$PKEXEC_PATH"; then
-    AC_MSG_ERROR([pkexec(1) is required.])
+AC_CHECK_PROG(PKEXEC_CHECK, pkexec, yes)
+if test -z "$PKEXEC_CHECK"; then
+  AC_MSG_ERROR([pkexec(1) is required.])
 fi
 
 AC_CONFIG_FILES([Makefile])

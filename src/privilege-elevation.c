@@ -30,8 +30,8 @@
 #include "argparse/argparse.h"
 #include "protocol.h"
 
-#if !defined(PKEXEC_PATH) || !defined(MECHANISM_PATH)
-  #error "PKEXEC_PATH and MECHANISM_PATH must be defined."
+#if !defined(MECHANISM_PATH)
+  #error "MECHANISM_PATH must be defined."
 #endif
 
 static struct sigaction old_sigint_action;
@@ -127,11 +127,6 @@ static void
 record_mechanism_process (int signal, siginfo_t * signal_info, void * context) {
 
   assert(signal == SIGCHLD);
-
-  // this can also be called as part of pkexec
-  // that would be the mechanism as well
-  // in such a case we can handle its specific errors as well
-  // 127 no pkexec perm and 126 user cancelled
 
   switch (signal_info->si_code) {
   case CLD_EXITED:
@@ -300,7 +295,7 @@ exec_mechanism (
     // the child process can access file descriptors in the parent
     // however we need to pass file descriptors from the child to the parent
     // so we'll be using unix domain sockets for communication
-    execv(process_path, (char * const *) process_arguments);
+    execvp(process_path, (char * const *) process_arguments);
 
     // exec failed, we must write the errno into the pipe
     if (write(exec_pipe[1], &errno, sizeof(errno)));
@@ -388,8 +383,10 @@ launch_mechanism (
 ) {
 
   if (!privileged) {
+    fprintf(stderr, "%s\n", "Attempting to open without elevated privileges");
     status = exec_mechanism(mechanism_path, mechanism_args, mechanism_pid);
   } else {
+    fprintf(stderr, "%s\n", "Attempting to open with elevated privileges");
     status = exec_mechanism(pkexec_path, pkexec_args, mechanism_pid);
   }
 
@@ -443,11 +440,10 @@ main (int argc, const char * const * argv) {
   const char tmp_name[] = "polkit_demo.XXXXXX";
   const char socket_name[] = "socket.sock";
 
-  char pkexec_path[] = PKEXEC_PATH;
+  char pkexec_path[] = "pkexec";
   char mechanism_path[] = MECHANISM_PATH;
 
-  char pkexec_name[] = PKEXEC_PATH;
-  basename(pkexec_name);
+  char pkexec_name[] = "pkexec";
   char mechanism_name[] = MECHANISM_PATH;
   basename(mechanism_name);
 
@@ -560,7 +556,7 @@ main (int argc, const char * const * argv) {
     perror("fork()");
     exit(EX_OSERR);
   case -2:
-    snprintf(error_string, sizeof(error_string), "execv(%s)", mechanism_path);
+    snprintf(error_string, sizeof(error_string), "execvp(%s)", mechanism_path);
     perror(error_string);
     exit(EX_OSERR);
   case -3:
