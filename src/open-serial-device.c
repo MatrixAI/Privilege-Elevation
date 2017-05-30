@@ -1,3 +1,5 @@
+#define _GNU_SOURCE
+
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -19,6 +21,7 @@
 #include "baudrates.h"
 #include "protocol.h"
 
+static int status;
 static ssize_t ssize;
 
 static int
@@ -137,33 +140,22 @@ main (int argc, const char * const * argv) {
   unix_sock_addr.sun_family = AF_UNIX;
   snprintf(unix_sock_addr.sun_path, UNIX_PATH_MAX, "%s", unix_sock_path);
 
-  if (
+  status = TEMP_FAILURE_RETRY(
     connect(
       unix_sock_fd,
       (struct sockaddr *) &unix_sock_addr,
       sizeof(unix_sock_addr)
-    ) != 0
-  ) {
+    )
+  );
+
+  if (status != 0) {
     perror("connect()");
     exit(EX_OSERR);
   }
 
-  MechanismProto message = {
-    .type = PRIVFD
-  };
-
-  uint8_t type_buffer[1] = {0};
-  type_buffer[0] = message.type;
-
-  char message_buffer[sizeof(type_buffer)] = {0};
-  memcpy(message_buffer, type_buffer, sizeof(type_buffer));
-
-  printf("Child Process Buffer!\n");
-  for (int i = 0; i < sizeof(message_buffer); ++i) {
-    printf("0x%02X", message_buffer[i]);
-  }
-  printf("\n");
-
+  MechanismProto message[1] = {{ PRIVFD }};
+  char message_buffer[sizeof(message)] = {0};
+  memcpy(message_buffer, message, sizeof(message));
   struct iovec io_vector[1] = {
     {
       .iov_base = message_buffer,
@@ -171,32 +163,42 @@ main (int argc, const char * const * argv) {
     }
   };
 
-  char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
+  union {
+    char buf[CMSG_SPACE(sizeof(int))];
+    struct cmsghdr align;
+  } ancillary_buffer;
 
   struct msghdr message_options = {0};
   message_options.msg_iov = io_vector;
-  message_options.msg_iovlen = sizeof(io_vector);
-  message_options.msg_control = ancillary_buffer;
-  message_options.msg_controllen = sizeof(ancillary_buffer);
+  message_options.msg_iovlen = 1;
+  message_options.msg_control = ancillary_buffer.buf;
+  message_options.msg_controllen = sizeof(ancillary_buffer.buf);
 
-  struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
-  control_message->cmsg_level = SOL_SOCKET;
-  control_message->cmsg_type = SCM_RIGHTS;
-  control_message->cmsg_len = CMSG_LEN(sizeof(int));
+  struct cmsghdr * ancillary_message = CMSG_FIRSTHDR(&message_options);
+  ancillary_message->cmsg_level = SOL_SOCKET;
+  ancillary_message->cmsg_type = SCM_RIGHTS;
+  ancillary_message->cmsg_len = CMSG_LEN(sizeof(int));
 
-  int * ancillary_p = (int *) CMSG_DATA(control_message);
+  int * ancillary_p = (int *) CMSG_DATA(ancillary_message);
   *ancillary_p = serial_fd;
 
-  printf("Child Process SEND!\n");
-  ssize = sendmsg(unix_sock_fd, &message_options, 0);
-  printf("Child Process FIN SEND!\n");
-
-  if (ssize < sizeof(message_buffer)) {
-    perror("recvmsg()");
-    exit(EX_OSERR);
+  printf("Sending Data:");
+  for (int i = 0; i < sizeof(message_buffer); ++i) {
+    printf(" 0x%02X", message_buffer[i]);
   }
+  printf("\n");
 
-  printf("Child Process FIN FIN!\n");
+  ssize = TEMP_FAILURE_RETRY(
+    sendmsg(unix_sock_fd, &message_options, 0)
+  );
+
+  if (ssize == -1) {
+    perror("sendmsg()");
+    exit(EX_OSERR);
+  } else if ((size_t) ssize < sizeof(message_buffer)) {
+    fprintf(stderr, "sendmsg(): %s\n", "Sent incorrect message size from mechanism");
+    exit(EX_PROTOCOL);
+  }
 
   exit(EXIT_SUCCESS);
 

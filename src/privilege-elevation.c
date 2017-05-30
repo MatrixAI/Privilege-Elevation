@@ -72,7 +72,7 @@ cleanup_and_exit () {
   if (unix_peer_fd) close(unix_peer_fd);
   if (unix_sock_fd) close(unix_sock_fd);
   if (unix_sock_dir && *unix_sock_dir) {
-      nftw(unix_sock_dir, nftw_callback, 64, FTW_DEPTH | FTW_PHYS);
+    nftw(unix_sock_dir, nftw_callback, 64, FTW_DEPTH | FTW_PHYS);
   }
 
 }
@@ -172,9 +172,8 @@ parse_args (
 ) {
 
   // command, -option, option_value, --, param
-  unsigned int max_args = 5;
 
-  const char * * argv_[sizeof(char *) * max_args] = {0};
+  const char * argv_[sizeof(char *) * 5] = {0};
   memcpy((char * *) argv_, argv, sizeof(argv_));
 
   static const char * const command_usage[] = {
@@ -198,7 +197,7 @@ parse_args (
 
   argparse_describe(&argparse, "\nThis demonstrates lazy privilege elevation via opening a secured serial port resource.", "");
 
-  int argc_ = argparse_parse(&argparse, MIN(argc, max_args), argv_);
+  int argc_ = argparse_parse(&argparse, MIN(argc, 5), argv_);
 
   if (argc_ < 1) {
     argparse_usage(&argparse);
@@ -435,6 +434,9 @@ main (int argc, const char * const * argv) {
   atexit(cleanup_and_exit);
   handle(SIGINT, cleanup_and_exit_sigint, 0, &old_sigint_action);
 
+  setbuf(stdout, NULL);
+  setbuf(stderr, NULL);
+
   // permanent variables
   const char * tmp_dir= getenv("TMPDIR");
   if (!tmp_dir) tmp_dir = "/tmp";
@@ -582,8 +584,8 @@ main (int argc, const char * const * argv) {
   socklen_t unix_peer_addr_size = sizeof(unix_peer_addr);
 
   // the accepted connection is not non-blocking
-  TEMP_FAILURE_RETRY(
-    unix_peer_fd = accept(
+  unix_peer_fd = TEMP_FAILURE_RETRY(
+    accept(
       unix_sock_fd,
       (struct sockaddr *) &unix_peer_addr,
       &unix_peer_addr_size
@@ -606,30 +608,26 @@ main (int argc, const char * const * argv) {
 
   /* RECEIVE CODE */
 
-  MechanismProto message = {0};
-
-  uint8_t type_buffer[1] = {0};
-
-  // the buffer for our message
-  char message_buffer[sizeof(type_buffer)] = {0};
-
-  // gather vector
-  struct iovec io_vector[1] = {
-    {
+  // message is an array of 1 MechanismProto
+  MechanismProto message[1] = {0};
+  char message_buffer[sizeof(message)] = {0};
+  struct iovec io_vector[1] = {{
       .iov_base = message_buffer,
       .iov_len = sizeof(message_buffer)
     }
   };
 
-  // buffer for the ancillary data (the file descriptor)
-  char ancillary_buffer[CMSG_SPACE(sizeof(int))] = {0};
+  // suitably aligned ancillary data
+  union {
+    char buf[CMSG_SPACE(sizeof(int))];
+    struct cmsghdr align;
+  } ancillary_buffer;
 
-  // msghdr is the socket options
   struct msghdr message_options = {0};
   message_options.msg_iov = io_vector;
-  message_options.msg_iovlen = sizeof(io_vector);
-  message_options.msg_control = ancillary_buffer;
-  message_options.msg_controllen = sizeof(ancillary_buffer);
+  message_options.msg_iovlen = 1;
+  message_options.msg_control = ancillary_buffer.buf;
+  message_options.msg_controllen = sizeof(ancillary_buffer.buf);
 
   if (!unblock_sigchld(&signal_orig_mask)) {
     perror("unblock_sigchld()");
@@ -638,29 +636,49 @@ main (int argc, const char * const * argv) {
 
   while (true) {
 
-    ssize = recvmsg(unix_peer_fd, &message_options, 0);
+    ssize = recvmsg(unix_peer_fd, &message_options, MSG_WAITALL);
 
-    if (ssize < sizeof(message_buffer)) {
+    if (ssize == -1) {
 
-      if (ssize == -1) {
-        if (errno == EINTR) {
-          if (mechanism_status != -1 && mechanism_status != EXIT_SUCCESS) {
-            fprintf(stderr, "Error: %s %i\n", "Mechanism failed after connecting with code:", mechanism_status);
-            exit(EX_UNAVAILABLE);
-          }
-        } else {
-          perror("recvmsg()");
-          exit(EX_OSERR);
+      if (errno == EINTR) {
+
+        if (mechanism_status != -1 && mechanism_status != EXIT_SUCCESS) {
+          fprintf(stderr, "Error: %s %i\n", "Mechanism failed after connecting with code:", mechanism_status);
+          exit(EX_UNAVAILABLE);
         }
+
       } else {
-        fprintf(stderr, "Error: %s\n", "Received incorrect message size from mechanism");
-        exit(EX_PROTOCOL);
+
+        perror("recvmsg()");
+        exit(EX_OSERR);
+
       }
+
+    } else if ((size_t) ssize < sizeof(message_buffer)) {
+
+      fprintf(stderr, "recvmsg(): %s\n", "Received incorrect message size from mechanism");
+      exit(EX_PROTOCOL);
+
+    } else {
+
+      break;
 
     }
 
-    break;
+  }
 
+  // reinterpreting message buffer as message
+  memcpy(message, message_buffer, sizeof(message));
+
+  printf("Received Data:");
+  for (int i = 0; i < sizeof(message_buffer); ++i) {
+    printf(" 0x%02X", message_buffer[i]);
+  }
+  printf("\n");
+
+  if (message[0].type != PRIVFD) {
+    fprintf(stderr, "Error: %s\n", "Unexpected message from mechanism");
+    exit(EX_PROTOCOL);
   }
 
   if ((message_options.msg_flags & MSG_CTRUNC) == MSG_CTRUNC) {
@@ -668,26 +686,14 @@ main (int argc, const char * const * argv) {
     exit(EX_SOFTWARE);
   }
 
-  memcpy(type_buffer, message_buffer, sizeof(type_buffer));
-
-  message.type = type_buffer[0];
-
-  for (int i = 0; i < sizeof(message_buffer); ++i) {
-    printf("0x%02X", message_buffer[i]);
-  }
-
-  if (message.type != PRIVFD) {
-    fprintf(stderr, "Error: %s\n", "Unexpected message from mechanism");
-    exit(EX_PROTOCOL);
-  }
-
-  struct cmsghdr * control_message = CMSG_FIRSTHDR(&message_options);
+  struct cmsghdr * ancillary_message = CMSG_FIRSTHDR(&message_options);
 
   if (
-    control_message->cmsg_level == SOL_SOCKET &&
-    control_message->cmsg_type == SCM_RIGHTS
+    ancillary_message->cmsg_level == SOL_SOCKET &&
+    ancillary_message->cmsg_type == SCM_RIGHTS
   ) {
-    serial_port_fd = *((int *) CMSG_DATA(control_message));
+    int * ancillary_p = (int *) CMSG_DATA(ancillary_message);
+    serial_port_fd = *ancillary_p;
   } else {
     fprintf(stderr, "Error: %s\n", "Unknown ancillary data from mechanism");
   }
@@ -702,9 +708,12 @@ main (int argc, const char * const * argv) {
 
   /* USE THE SERIAL PORT CODE */
 
-  ssize = write(serial_port_fd, "Hello World", 11);
-  if (ssize != 11) {
-    fprintf(stderr, "Error: %s\n", "Could not write to serial port");
+  const char serial_message[] = "Hello World\r\n";
+  ssize = TEMP_FAILURE_RETRY(
+    write(serial_port_fd, serial_message, sizeof(serial_message))
+  );
+  if (ssize != sizeof(serial_message)) {
+    fprintf(stderr, "Error: %s\n", "Could not complete message to serial port");
     exit(EX_IOERR);
   }
 
