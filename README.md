@@ -3,7 +3,7 @@ Privilege-Elevation
 
 Executing `privilege-elevation` should demonstrate privilege elevation in terms of opening of a serial port. This is to achieve least-privilege when it comes to accessing rs232 peripherals like Arduino devices.
 
-You pass in serial port path, it will first try to open it using an unprivileged child process, if it fails, it will make use of the Polkit infrastructure and `pkexec` the child process to open it. If the appropriate action file is installed, Polkit will prompt the user to authorise this opening the serial port action. If this succeeds, the file descriptor to the serial port is passed back to the parent process using a unix domain socket. The child process is kept simple and terminates immediately, the superuser privileges only exist temporally for this action and is not kept around.
+You pass in serial port path, it will first try to open it using an unprivileged child process, if it fails, it will make use of the Polkit infrastructure and `pkexec` the child process to open it. If the appropriate action file is installed, Polkit will prompt the user to authorise this opening the serial port action. If this succeeds, the file descriptor to the serial port is passed back to the parent process using a unix domain socket. The child process is kept simple and terminates immediately, the superuser privileges only exist temporally for this action and is not kept around. This child process opening code is intentionally kept small. This reduces the surface area of any potential compromise unlike setuid binaries, allowing easier auditing of privileged code.
 
 This is different from normal Polkit programs who have a long running daemon.
 As that would mean the daemon is the one that is already authorised with superuser
