@@ -70,6 +70,8 @@ To uninstall it:
 nix-env --uninstall privilege-elevation
 ```
 
+Note that installing it using `nix-env` will not make use of the polkit policy file, because this would be a security vulnerability (however, it will still work). To make use of the polkit policy file, you would need to install it as part of your system packages in your `configuration.nix`. For more information see: https://github.com/MatrixAI/Privilege-Elevation/issues/2
+
 ### Not on Nix:
 
 Download the release tarball:
