@@ -113,7 +113,7 @@ Run these at the root of the project:
 ./configure
 make distcheck
 make dist
-``` 
+```
 
 To check if Nix building works:
 
